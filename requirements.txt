@@ -1,6 +1,16 @@
+# Python 3.12
+
 # Uncomment to enable Azure Monitor OpenTelemetry
 # Ref: aka.ms/functions-azure-monitor-python 
 # azure-monitor-opentelemetry 
-
+# Python 3.12
 azure-functions
+azure-identity
+azure-storage-blob
+azure.core
+
 entsoe-py
+requests
+
+pandas
+numpy
