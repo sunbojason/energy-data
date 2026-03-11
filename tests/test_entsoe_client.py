@@ -60,6 +60,7 @@ def test_fetch_day_ahead_prices_success(mock_entsoe_pandas_client_class, entsoe_
     assert isinstance(result_df, pd.DataFrame), "Output must be converted to a DataFrame."
     assert 'DayAheadPrice' in result_df.columns, "Column should be renamed correctly."
     assert len(result_df) == 3, "Should contain exactly 3 records."
+    assert isinstance(result_df.index, pd.DatetimeIndex), "Index must be a DatetimeIndex"
     assert str(result_df.index.tz) == tz, "Timezone must be preserved."
     
     # Verify the mock was called with correct parameters
