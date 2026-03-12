@@ -3,128 +3,78 @@ import logging
 import os
 import pandas as pd
 from datetime import datetime, timedelta
-from shared_logic.entsoe_client import EntsoeDataClient
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import AzureError
+
+from shared_logic.entsoe_client import EntsoeDataClient
 from shared_logic.cleaning_service import CleaningService
 
-# Global initialization: Reuse credential and clients across executions for better performance
-# In serverless, this stays in memory across warm starts.
+# --- Global Initialization (Singleton Pattern) ---
+# Reusing credentials and clients across warm starts saves ~200-500ms per execution
 credential = DefaultAzureCredential()
+storage_account_name = os.environ.get('STORAGE_ACCOUNT_NAME')
+account_url = f"https://{storage_account_name}.blob.core.windows.net" if storage_account_name else None
+
+# Initialize outside to reuse the connection pool
+blob_service_client = BlobServiceClient(account_url=account_url, credential=credential) if account_url else None
 
 app = func.FunctionApp()
 
-@app.timer_trigger(schedule="0 0 2 * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 0 2 * * *", arg_name="myTimer", run_on_startup=False)
+@app.retry(strategy="fixed_delay", max_retry_count="3", delay_interval="00:05:00")
 def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
-    # 1. Environment & Pre-flight Checks
-    storage_account_name = os.environ.get('STORAGE_ACCOUNT_NAME')
-    container_name = os.environ.get("RAW_DATA_CONTAINER", "raw-data")
-    
-    if not storage_account_name:
-        logging.error("ENVIRONMENT ERROR: STORAGE_ACCOUNT_NAME is not configured.")
+    if not storage_account_name or not blob_service_client:
+        logging.error("CRITICAL: Storage configuration is missing.")
         return
 
-    if myTimer.past_due:
-        logging.warning('Timer is running late, but continuing ingestion...')
+    logging.info("Starting scheduled ingestion for NL Day-Ahead prices.")
 
-    logging.info(f"Starting ingestion for Storage Account: {storage_account_name}")
-
-    # 2. Domain Logic Initialization
     try:
-        # Client handles its own internal API key validation
         client = EntsoeDataClient()
-    except ValueError as ve:
-        logging.error(f"CONFIGURATION ERROR: {str(ve)}")
-        return
-
-    # 3. Define Bidding Zone and Time Window
-    # For Dutch energy market (NL), timestamps are critical for cross-border settlement.
-    tz = 'Europe/Amsterdam'
-    try:
+        tz = 'Europe/Amsterdam'
         end_date = pd.Timestamp.now(tz=tz).floor('D')
         start_date = end_date - timedelta(days=1)
-        logging.info(f"Target Window: {start_date} to {end_date} ({tz})")
-    except Exception as te:
-        logging.error(f"DATETIME ERROR: Failed to calculate date window: {str(te)}")
-        return
-    
-    # 4. Data Acquisition
-    try:
-        data_df = client.fetch_day_ahead_prices(
-            country_code='NL',
-            start_time=start_date,
-            end_time=end_date
-        )
+
+        data_df = client.fetch_day_ahead_prices(country_code='NL', start_time=start_date, end_time=end_date)
 
         if data_df is None or data_df.empty:
-            logging.warning(f"DATA GAP: No data found for NL between {start_date} and {end_date}.")
+            logging.warning(f"DATA GAP: No data found for {start_date.date()}.")
             return
 
-    except Exception as e:
-        # This catches errors that tenacity couldn't fix (e.g., persistent 401/403)
-        logging.error(f"INGESTION FAILURE: API request failed: {str(e)}")
-        return
+        # Data Integrity Check: Verify expected row count for Quant models
+        expected_rows = 24 # Standard day
+        if len(data_df) != expected_rows:
+            logging.warning(f"INTEGRITY ALERT: Expected {expected_rows} rows, but got {len(data_df)}.")
 
-    # 5. Cloud Storage Persistence (The 'Raw' Layer)
-    try:
-        account_url = f"https://{storage_account_name}.blob.core.windows.net"
-        blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
-        
-        # Consistent naming convention is vital for backtesting
+        # Persistence
+        container_name = os.environ.get("RAW_DATA_CONTAINER", "raw-data")
         file_name = f"nl_day_ahead_{start_date.strftime('%Y%m%d')}.csv"
         
-        # Ensure index=True to preserve the 15-min or 60-min interval timestamps
-        csv_data = data_df.to_csv(index=True)
-        
         blob_client = blob_service_client.get_blob_client(container=container_name, blob=file_name)
+        blob_client.upload_blob(data_df.to_csv(index=True), overwrite=True)
         
-        # overwrite=True prevents duplicate trigger issues if the function retries
-        blob_client.upload_blob(csv_data, overwrite=True)
-        
-        logging.info(f"STORAGE SUCCESS: Uploaded {file_name} ({len(data_df)} rows) to {container_name}")
+        logging.info(f"INGESTION SUCCESS: Saved {file_name} to {container_name}.")
 
-    except AzureError as ae:
-        logging.error(f"AZURE STORAGE ERROR: Identity/Permission or Network issue: {str(ae)}")
     except Exception as e:
-        logging.error(f"UNEXPECTED ERROR: {str(e)}")
+        logging.error(f"PIPELINE FAILURE: {str(e)}")
+        raise # Raising allows the @app.retry decorator to catch it
 
-# Blob Trigger: Monitors the 'raw-data' container
-# The {name} pattern captures the filename to reuse it for the output
-@app.blob_trigger(arg_name="myblob", 
-                  path="raw-data/{name}",
-                  connection="AzureWebJobsStorage")
-# Blob Output: Automatically saves the returned string to 'cleaned-data'
-@app.blob_output(arg_name="outputblob", 
-                 path="cleaned-data/{name}",
-                 connection="AzureWebJobsStorage")
+@app.blob_trigger(arg_name="myblob", path="raw-data/{name}", connection="AzureWebJobsStorage")
+@app.blob_output(arg_name="outputblob", path="cleaned-data/{name}", connection="AzureWebJobsStorage")
 def blob_trigger_cleaning_processor(myblob: func.InputStream, outputblob: func.Out[str]):
-    """
-    Automatically triggered when a new raw energy data file is uploaded.
-    Cleans the data and persists it to the silver/cleaned layer.
-    """
     file_name = myblob.name
-    logging.info(f"Blob trigger received new file: {file_name} ({myblob.length} bytes)")
+    logging.info(f"Processing new raw file: {file_name}")
 
     try:
-        # 1. Read the raw content
         raw_content = myblob.read().decode('utf-8')
-        
-        if not raw_content:
-            logging.warning(f"File {file_name} is empty. Skipping.")
-            return
+        if not raw_content: return
 
-        # 2. Execute our tested cleaning logic
+        # Transform and Clean
         cleaned_csv = CleaningService.clean_energy_data(raw_content)
         
-        # 3. Use Output Binding to save the file
         if cleaned_csv:
             outputblob.set(cleaned_csv)
-            logging.info(f"SUCCESS: {file_name} has been cleaned and saved to cleaned-data.")
-        else:
-            logging.warning(f"Cleaning resulted in empty data for {file_name}.")
-
+            logging.info(f"CLEANING SUCCESS: {file_name} promoted to cleaned layer.")
     except Exception as e:
-        # We log the error but don't re-raise to avoid infinite retry loops 
-        # unless you have a specific Dead Letter Queue strategy.
-        logging.error(f"ERROR: Failed to process blob {file_name}. Details: {str(e)}")
+        logging.error(f"CLEANING FAILURE: {file_name} - {str(e)}")
