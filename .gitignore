@@ -48,3 +48,6 @@ __pycache__/
 __blobstorage__
 __queuestorage__
 __azurite_db*__.json.DS_Store
+
+# MacOS specific files
+.DS_Store
