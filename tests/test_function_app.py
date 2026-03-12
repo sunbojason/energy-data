@@ -1,12 +1,10 @@
+import logging
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch, ANY
 from datetime import datetime
 import azure.functions as func
-
-# Import the function from your project root
-# Ensure shared_logic and function_app are in the python path (via conftest.py or python -m pytest)
-from function_app import timer_trigger_entsoe_ingestion
+import function_app
 
 @pytest.fixture
 def mock_timer():
@@ -15,99 +13,92 @@ def mock_timer():
     timer.past_due = False
     return timer
 
+# Patching the global variables directly inside the function_app module
+@patch("function_app.blob_service_client")
+@patch("function_app.storage_account_name", "test_quant_storage")
 @patch("function_app.EntsoeDataClient")
-@patch("function_app.BlobServiceClient")
-@patch("os.environ.get")
-def test_timer_trigger_ingestion_success(mock_env_get, mock_blob_service_class, mock_entsoe_client_class, mock_timer):
+def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
-    Test a successful ingestion flow:
-    API returns data -> Storage account is reachable -> File is uploaded.
+    Test a successful ingestion flow for NL Day-Ahead prices.
+    Verifies that the global client is used and data is uploaded.
     """
-    # 1. Mock Environment Variables
-    def env_side_effect(key, default=None):
-        vars = {
-            "STORAGE_ACCOUNT_NAME": "test_energy_storage",
-            "RAW_DATA_CONTAINER": "raw-data"
-        }
-        return vars.get(key, default)
-    mock_env_get.side_effect = env_side_effect
+    caplog.set_level(logging.INFO)
 
-    # 2. Mock ENTSO-E Client behavior
     mock_client_instance = mock_entsoe_client_class.return_value
-    # Create a dummy DataFrame representing Dutch electricity prices
     mock_df = pd.DataFrame(
-        {"DayAheadPrice": [45.0, 48.5]}, 
-        index=pd.date_range("2026-03-10", periods=2, freq="h", tz="Europe/Amsterdam")
+        {"DayAheadPrice": [45.0] * 24}, 
+        index=pd.date_range("2026-03-10", periods=24, freq="h", tz="Europe/Amsterdam")
     )
     mock_client_instance.fetch_day_ahead_prices.return_value = mock_df
 
-    # 3. Mock Blob Storage hierarchy (Client -> Container -> Blob)
-    mock_blob_service_instance = mock_blob_service_class.return_value
     mock_blob_client = MagicMock()
-    mock_blob_service_instance.get_blob_client.return_value = mock_blob_client
+    mock_global_blob_service.get_blob_client.return_value = mock_blob_client
 
-    # 4. Run the function
-    timer_trigger_entsoe_ingestion(mock_timer)
+    function_app.timer_trigger_entsoe_ingestion(mock_timer)
 
-    # 5. Assertions
-    # Check if the API was called with the correct logic
     mock_client_instance.fetch_day_ahead_prices.assert_called_once()
     
-    # Check if BlobServiceClient was initialized with the correct URL
-    mock_blob_service_class.assert_called_once_with(
-        account_url="https://test_energy_storage.blob.core.windows.net",
-        credential=ANY
+    # Verify the global blob service was used to get the specific file client
+    mock_global_blob_service.get_blob_client.assert_called_once_with(
+        container="raw-data", 
+        blob=ANY  # Matches the dynamic timestamped filename
     )
 
-    # Check if upload_blob was called
+    # Verify upload was executed with overwrite=True
     mock_blob_client.upload_blob.assert_called_once()
     
-    # Verify the content: Ensure the CSV header exists in the uploaded string
-    call_args = mock_blob_client.upload_blob.call_args
-    uploaded_content = call_args[0][0]
+    # Verify the CSV content integrity
+    uploaded_content = mock_blob_client.upload_blob.call_args[0][0]
     assert "DayAheadPrice" in uploaded_content
     assert "2026-03-10" in uploaded_content
+    assert "INGESTION SUCCESS" in caplog.text
 
+
+@patch("function_app.blob_service_client")
+@patch("function_app.storage_account_name", "test_quant_storage")
 @patch("function_app.EntsoeDataClient")
-@patch("os.environ.get")
-def test_timer_trigger_ingestion_no_data(mock_env_get, mock_entsoe_client_class, mock_timer):
+def test_timer_trigger_ingestion_no_data(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
-    Test the scenario where API returns no data. 
-    The function should exit gracefully without attempting to upload.
+    Test scenario where ENTSO-E returns an empty DataFrame.
+    The function must exit gracefully without writing to storage.
     """
-    mock_env_get.return_value = "test_storage"
-    
-    # Mock an empty DataFrame response
     mock_client_instance = mock_entsoe_client_class.return_value
     mock_client_instance.fetch_day_ahead_prices.return_value = pd.DataFrame()
 
-    with patch("function_app.BlobServiceClient") as mock_blob_service_class:
-        timer_trigger_entsoe_ingestion(mock_timer)
-        
-        # Ingestion should stop before calling Blob Storage
-        mock_blob_service_class.assert_not_called()
+    function_app.timer_trigger_entsoe_ingestion(mock_timer)
+    
+    mock_global_blob_service.get_blob_client.assert_not_called()
+    assert "DATA GAP" in caplog.text
 
+
+@patch("function_app.blob_service_client")
+@patch("function_app.storage_account_name", "test_quant_storage")
 @patch("function_app.EntsoeDataClient")
-@patch("function_app.BlobServiceClient")
-@patch("os.environ.get")
-def test_timer_trigger_ingestion_storage_error(mock_env_get, mock_blob_service_class, mock_entsoe_client_class, mock_timer):
+def test_timer_trigger_ingestion_storage_error(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
-    Test handling of Azure Storage failures. 
-    The function should catch the error and log it, preventing a complete crash.
+    Test resilience against Azure Storage failures.
+    Ensures the error is caught, logged, and re-raised to trigger @app.retry.
     """
-    mock_env_get.return_value = "test_storage"
-    
-    # API works fine
-    mock_entsoe_instance = mock_entsoe_client_class.return_value
-    mock_entsoe_instance.fetch_day_ahead_prices.return_value = pd.DataFrame({"p": [1.0]})
+    mock_client_instance = mock_entsoe_client_class.return_value
+    mock_client_instance.fetch_day_ahead_prices.return_value = pd.DataFrame({"Price": [1.0]})
 
-    # Mock an upload failure (e.g., Auth error or Network timeout)
     mock_blob_client = MagicMock()
-    mock_blob_client.upload_blob.side_effect = Exception("Managed Identity Auth Failed")
-    mock_blob_service_class.return_value.get_blob_client.return_value = mock_blob_client
+    mock_blob_client.upload_blob.side_effect = Exception("Azure RBAC Identity Authorization Failed")
+    mock_global_blob_service.get_blob_client.return_value = mock_blob_client
 
-    # Execute - should not raise exception up (caught by try-except in function_app)
-    timer_trigger_entsoe_ingestion(mock_timer)
+    with pytest.raises(Exception, match="Azure RBAC Identity Authorization Failed"):
+        function_app.timer_trigger_entsoe_ingestion(mock_timer)
     
-    # Ensure it reached the upload step before failing
-    mock_blob_client.upload_blob.assert_called_once()
+    assert "PIPELINE FAILURE" in caplog.text
+
+
+@patch("function_app.blob_service_client", None)
+@patch("function_app.storage_account_name", None)
+def test_timer_trigger_missing_configuration(mock_timer, caplog):
+    """
+    Test the global configuration safety check.
+    If environment variables fail to load, the execution should abort immediately.
+    """
+    function_app.timer_trigger_entsoe_ingestion(mock_timer)
+    
+    assert "CRITICAL: Storage configuration is missing" in caplog.text

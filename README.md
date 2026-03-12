@@ -141,20 +141,29 @@ energy-data/
 
 4. **Configure local settings**
 
-   Populate `local.settings.json` with your credentials:
+   Populate `local.settings.json` with your Azure Storage and ENTSO-E credentials:
 
    ```json
    {
      "IsEncrypted": false,
      "Values": {
-       "AzureWebJobsStorage": "<your-storage-connection-string>",
        "FUNCTIONS_WORKER_RUNTIME": "python",
+       "AzureWebJobsStorage": "<your-storage-account-connection-string>",
+       "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>",
+       "RAW_DATA_CONTAINER": "raw-data",
        "ENTSOE_API_KEY": "<your-entsoe-api-key>"
      }
    }
    ```
 
-   > ⚠️ `local.settings.json` is git-ignored. Never commit secrets to source control.
+   **Configuration keys:**
+   - `FUNCTIONS_WORKER_RUNTIME` — Python runtime identifier
+   - `AzureWebJobsStorage` — Full connection string to your storage account
+   - `STORAGE_ACCOUNT_NAME` — Storage account name (used for blob client initialization)
+   - `RAW_DATA_CONTAINER` — Container name for raw ingested data
+   - `ENTSOE_API_KEY` — Your ENTSO-E Transparency Platform API key
+
+   > ⚠️ `local.settings.json` is git-ignored. Never commit secrets or connection strings to source control.
 
 5. **Run locally**
 
