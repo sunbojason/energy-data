@@ -7,6 +7,7 @@ from shared_logic.entsoe_client import EntsoeDataClient
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import AzureError
+from shared_logic.cleaning_service import CleaningService
 
 # Global initialization: Reuse credential and clients across executions for better performance
 # In serverless, this stays in memory across warm starts.
@@ -87,3 +88,43 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
         logging.error(f"AZURE STORAGE ERROR: Identity/Permission or Network issue: {str(ae)}")
     except Exception as e:
         logging.error(f"UNEXPECTED ERROR: {str(e)}")
+
+# Blob Trigger: Monitors the 'raw-data' container
+# The {name} pattern captures the filename to reuse it for the output
+@app.blob_trigger(arg_name="myblob", 
+                  path="raw-data/{name}",
+                  connection="AzureWebJobsStorage")
+# Blob Output: Automatically saves the returned string to 'cleaned-data'
+@app.blob_output(arg_name="outputblob", 
+                 path="cleaned-data/{name}",
+                 connection="AzureWebJobsStorage")
+def blob_trigger_cleaning_processor(myblob: func.InputStream, outputblob: func.Out[str]):
+    """
+    Automatically triggered when a new raw energy data file is uploaded.
+    Cleans the data and persists it to the silver/cleaned layer.
+    """
+    file_name = myblob.name
+    logging.info(f"Blob trigger received new file: {file_name} ({myblob.length} bytes)")
+
+    try:
+        # 1. Read the raw content
+        raw_content = myblob.read().decode('utf-8')
+        
+        if not raw_content:
+            logging.warning(f"File {file_name} is empty. Skipping.")
+            return
+
+        # 2. Execute our tested cleaning logic
+        cleaned_csv = CleaningService.clean_energy_data(raw_content)
+        
+        # 3. Use Output Binding to save the file
+        if cleaned_csv:
+            outputblob.set(cleaned_csv)
+            logging.info(f"SUCCESS: {file_name} has been cleaned and saved to cleaned-data.")
+        else:
+            logging.warning(f"Cleaning resulted in empty data for {file_name}.")
+
+    except Exception as e:
+        # We log the error but don't re-raise to avoid infinite retry loops 
+        # unless you have a specific Dead Letter Queue strategy.
+        logging.error(f"ERROR: Failed to process blob {file_name}. Details: {str(e)}")
