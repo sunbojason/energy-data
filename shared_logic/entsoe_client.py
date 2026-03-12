@@ -32,8 +32,7 @@ class EntsoeDataClient:
         cause = retry_state.outcome.exception()
         raise EntsoeAPIError(f"ENTSO-E API failure: {str(cause)}") from cause
 
-    # Retry up to 4 times. Wait 2s, then 4s, then 8s...
-    # Only retry on network/connection errors, NOT on missing data errors.
+
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=2, min=2, max=16),
@@ -78,6 +77,3 @@ class EntsoeDataClient:
         except Exception as e:
             logger.error(f"Failed to fetch data for {country_code} after retries. Error: {str(e)}")
             raise EntsoeAPIError(f"ENTSO-E API failure: {str(e)}") from e
-
-    # You can easily add more methods here following the same structural pattern
-    # For example: fetch_actual_generation, fetch_load_forecast, etc.
