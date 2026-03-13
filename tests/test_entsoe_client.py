@@ -1,117 +1,140 @@
 import os
-import sys
 import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock
 from requests.exceptions import RequestException
 from entsoe.exceptions import NoMatchingDataError
-from tenacity import wait_none
 
-# Assuming the client class is saved in shared_logic/entsoe_client.py
+# 1. Direct import of the custom exception and client
 from shared_logic.entsoe_client import EntsoeDataClient, EntsoeAPIError
 
-@pytest.fixture
+# --- Fixtures ---
+
+@pytest.fixture(autouse=True)
 def mock_env_key(monkeypatch):
     """
-    Mock the environment variable to ensure the client initializes correctly
-    without needing a real API key in the testing environment.
+    Automatically mock the API key for ALL tests in this module.
+    autouse=True prevents accidental external API calls.
     """
     monkeypatch.setenv("ENTSOE_API_KEY", "dummy_test_key_123")
 
 @pytest.fixture
-def entsoe_client(mock_env_key):
+def mock_entsoe_pandas_client():
     """
-    Fixture to provide an initialized EntsoeDataClient instance.
+    Centralized mock for the underlying ENTSO-E API client.
+    """
+    with patch("shared_logic.entsoe_client.EntsoePandasClient") as mock_class:
+        yield mock_class.return_value
+
+@pytest.fixture
+def entsoe_client(mock_entsoe_pandas_client):
+    """
+    Provides a clean instance of EntsoeDataClient.
+    The internal EntsoePandasClient is automatically patched by the fixture above.
     """
     return EntsoeDataClient()
 
-@patch("shared_logic.entsoe_client.EntsoePandasClient")
-def test_fetch_day_ahead_prices_success(mock_entsoe_pandas_client_class, entsoe_client):
+
+# --- Test Cases ---
+
+def test_fetch_day_ahead_prices_success(entsoe_client, mock_entsoe_pandas_client):
     """
-    Test successful data retrieval. It verifies that a pandas Series returned 
-    by the API is correctly transformed into a formatted DataFrame.
+    Verify successful retrieval and transformation of Day-Ahead prices.
+    Ensures index integrity and timezone preservation.
     """
-    # 1. Setup mock data with Amsterdam timezone
     tz = 'Europe/Amsterdam'
+    # Use a specific date to test standard behavior
     mock_timestamps = pd.date_range(start='2026-03-11 00:00', periods=3, freq='h', tz=tz)
     mock_prices = [45.5, 42.1, 39.8]
-    
-    # ENTSO-E client typically returns a pandas Series for prices
     mock_series = pd.Series(data=mock_prices, index=mock_timestamps)
     
-    # Configure the mock instance
-    mock_instance = mock_entsoe_pandas_client_class.return_value
-    mock_instance.query_day_ahead_prices.return_value = mock_series
-    
-    # Replace the internal client with our mock
-    entsoe_client.client = mock_instance
+    mock_entsoe_pandas_client.query_day_ahead_prices.return_value = mock_series
 
-    # 2. Execute
     start_time = pd.Timestamp('2026-03-11 00:00', tz=tz)
     end_time = pd.Timestamp('2026-03-11 03:00', tz=tz)
     
-    result_df = entsoe_client.fetch_day_ahead_prices(
-        country_code='NL', 
-        start_time=start_time, 
-        end_time=end_time
-    )
+    result_df = entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
 
-    # 3. Assert
-    assert isinstance(result_df, pd.DataFrame), "Output must be converted to a DataFrame."
-    assert 'DayAheadPrice' in result_df.columns, "Column should be renamed correctly."
-    assert len(result_df) == 3, "Should contain exactly 3 records."
-    assert isinstance(result_df.index, pd.DatetimeIndex), "Index must be a DatetimeIndex"
-    assert str(result_df.index.tz) == tz, "Timezone must be preserved."
+    # Type & Structure Assertions
+    assert isinstance(result_df, pd.DataFrame), "Output must be a DataFrame."
+    assert 'DayAheadPrice' in result_df.columns, "Target column must be correctly named."
+    assert len(result_df) == 3, "Row count mismatch."
     
-    # Verify the mock was called with correct parameters
-    mock_instance.query_day_ahead_prices.assert_called_once_with(
+    # Time-Series Integrity Assertions
+    assert isinstance(result_df.index, pd.DatetimeIndex), "Index must be DatetimeIndex."
+    assert str(result_df.index.tz) == tz, f"Timezone must strictly remain {tz}."
+    
+    mock_entsoe_pandas_client.query_day_ahead_prices.assert_called_once_with(
         'NL', start=start_time, end=end_time
     )
 
-@patch("shared_logic.entsoe_client.EntsoePandasClient")
-def test_fetch_day_ahead_prices_no_matching_data(mock_entsoe_pandas_client_class, entsoe_client):
+def test_fetch_day_ahead_prices_no_data(entsoe_client, mock_entsoe_pandas_client):
     """
-    Test handling of NoMatchingDataError. The system should absorb this gracefully
-    and return an empty DataFrame without crashing the pipeline.
+    Verify the client absorbs NoMatchingDataError gracefully,
+    returning an empty DataFrame to prevent pipeline crashes.
     """
-    # 1. Setup mock to raise NoMatchingDataError
-    mock_instance = mock_entsoe_pandas_client_class.return_value
-    mock_instance.query_day_ahead_prices.side_effect = NoMatchingDataError("No data found")
-    entsoe_client.client = mock_instance
+    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = NoMatchingDataError("API returned nothing")
 
-    # 2. Execute
     start_time = pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')
     end_time = pd.Timestamp('2026-03-11 01:00', tz='Europe/Amsterdam')
     
     result_df = entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
 
-    # 3. Assert
-    assert isinstance(result_df, pd.DataFrame), "Must return a DataFrame even on missing data."
-    assert result_df.empty, "DataFrame should be empty when no matching data is found."
+    assert isinstance(result_df, pd.DataFrame), "Must return DataFrame on empty data."
+    assert result_df.empty, "DataFrame must be empty."
 
-@patch("shared_logic.entsoe_client.EntsoePandasClient")
-def test_fetch_day_ahead_prices_network_failure(mock_entsoe_pandas_client_class, entsoe_client):
+@patch("tenacity.nap.time.sleep", return_value=None)  # Bypass tenacity sleep delay for fast tests
+def test_fetch_day_ahead_prices_network_failure(mock_sleep, entsoe_client, mock_entsoe_pandas_client):
     """
-    Test that a persistent network exception eventually raises our custom EntsoeAPIError
-    after tenacity exhausts its retry attempts.
+    Verify that persistent network failures exhaust retries 
+    and raise the custom EntsoeAPIError.
     """
-    # 1. Setup mock to raise a RequestException (Network error)
-    mock_instance = mock_entsoe_pandas_client_class.return_value
-    mock_instance.query_day_ahead_prices.side_effect = RequestException("Connection timeout")
-    entsoe_client.client = mock_instance
+    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = RequestException("Connection timeout")
 
-    # Disable tenacity's sleep so retries are instantaneous in tests
-    entsoe_client.fetch_day_ahead_prices.retry.wait = wait_none()
-
-    # 2. Execute and Assert
     start_time = pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')
     end_time = pd.Timestamp('2026-03-11 01:00', tz='Europe/Amsterdam')
     
-    # We expect our custom EntsoeAPIError to be raised after retries fail
-    with pytest.raises(EntsoeAPIError) as exc_info:
+    with pytest.raises(EntsoeAPIError, match="ENTSO-E API failure"):
         entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
         
-    assert "ENTSO-E API failure" in str(exc_info.value)
-    # The underlying tenacity retry mechanism should have attempted the call multiple times.
-    # We can check that the mock was called more than once.
-    assert mock_instance.query_day_ahead_prices.call_count > 1, "Should have retried multiple times before failing."
+    # Verify retry logic fired at least more than once
+    assert mock_entsoe_pandas_client.query_day_ahead_prices.call_count > 1, "Tenacity retry mechanism failed."
+
+
+# --- Aggregator Test (Multi-dimensional Market Data) ---
+
+def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pandas_client):
+    """
+    Verify the aggregator correctly fetches prices, load, and cross-border flows,
+    and merges them into a single aligned DataFrame.
+    """
+    tz = 'Europe/Amsterdam'
+    idx = pd.date_range(start='2026-03-11 00:00', periods=2, freq='h', tz=tz)
+    
+    # Mocking different API endpoint responses
+    mock_price_series = pd.Series([50.0, 52.0], index=idx)
+    mock_load_actual = pd.Series([10000.0, 10500.0], index=idx)
+    mock_export_fr = pd.Series([500.0, 400.0], index=idx)
+    
+    mock_entsoe_pandas_client.query_day_ahead_prices.return_value = mock_price_series
+    mock_entsoe_pandas_client.query_load.return_value = mock_load_actual
+    # Setup load forecast to throw NoData to test partial failure resilience
+    mock_entsoe_pandas_client.query_load_forecast.side_effect = NoMatchingDataError("No forecast")
+    mock_entsoe_pandas_client.query_crossborder_flows.return_value = mock_export_fr
+
+    start_time = idx[0]
+    end_time = idx[-1]
+    
+    # Execute the comprehensive fetch
+    result_df = entsoe_client.fetch_comprehensive_market_data('NL', start_time, end_time)
+    
+    # Assertions
+    assert not result_df.empty, "Aggregator should return data."
+    
+    # Check if the merge aligned columns correctly
+    expected_columns = ['DayAheadPrice', 'Actual Load', 'FR']
+    for col in expected_columns:
+        assert col in result_df.columns, f"Missing expected aggregated column: {col}"
+        
+    # Verify the partial failure didn't crash the merge
+    assert 'Forecasted Load' not in result_df.columns, "Forecast should be safely omitted on error."

@@ -170,6 +170,12 @@ energy-data/
    ```bash
    func start
    ```
+   Since the ingestion is normally triggered by a timer, use the following Administrative API call to trigger it immediately for testing:
+   ```bash
+   curl -v -X POST http://localhost:7071/admin/functions/timer_trigger_entsoe_ingestion \
+      -H "Content-Type: application/json" \
+      -d "{}"
+   ``` 
 
 ---
 
