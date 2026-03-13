@@ -5,7 +5,6 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime
 
 # 1. Dynamic path injection to locate 'shared_logic'
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -25,7 +24,7 @@ def load_environment_config():
                 os.environ[k] = str(v)
 
 def run_price_visualization():
-    """Fetch, clean, and visualize energy prices with data integrity stats."""
+    """Fetch, clean, and visualize comprehensive market data."""
     load_environment_config()
     client = EntsoeDataClient()
     
@@ -35,9 +34,10 @@ def run_price_visualization():
     end_date = current_time.ceil('h')
     start_date = end_date - pd.Timedelta(days=3)
     
-    print(f"STATUS: Fetching raw data from {start_date} to {end_date}...")
+    print(f"STATUS: Fetching comprehensive market data from {start_date} to {end_date}...")
     try:
-        raw_df = client.fetch_day_ahead_prices('NL', start_time=start_date, end_time=end_date)
+        # Use the newly upgraded aggregator method
+        raw_df = client.fetch_comprehensive_market_data('NL', start_time=start_date, end_time=end_date)
     except Exception as e:
         print(f"ERROR: Failed to fetch data: {e}")
         return
@@ -47,58 +47,68 @@ def run_price_visualization():
         return
 
     # 2. Process through CleaningService
-    print("STATUS: Applying cleaning and resampling logic...")
+    print("STATUS: Applying 15-minute resampling and filling logic...")
     raw_csv_buffer = raw_df.to_csv()
     cleaned_csv_str = CleaningService.clean_energy_data(raw_csv_buffer)
     
     df_cleaned = pd.read_csv(io.StringIO(cleaned_csv_str), index_col=0, parse_dates=True)
     df_cleaned.index = pd.to_datetime(df_cleaned.index).tz_convert(tz_local)
 
-    # Calculate Data Stats
-    total_hours = len(df_cleaned)
-    missing_hours = df_cleaned.iloc[:, 0].isna().sum()
-
-    # 3. Visualization with Light Theme, Stats, and Timestamp
+    # 3. Visualization: Dual-Axis Chart for Prices and Load
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax1 = plt.subplots(figsize=(14, 7))
     
-    # Main Price Curve with Hour Count in label
-    ax.plot(df_cleaned.index, df_cleaned.iloc[:, 0], 
-            label=f'Cleaned Price ({total_hours}h total)', 
-            color='#1f77b4', linewidth=2, zorder=3)
-    
-    # Raw Points
-    ax.scatter(raw_df.index, raw_df.iloc[:, 0], 
-               color='#ff7f0e', s=15, alpha=0.5, 
-               label=f'Raw API Points (missing: {missing_hours}h)', zorder=2)
+    # --- AXIS 1 (Left): Day-Ahead Price ---
+    if 'DayAheadPrice' in df_cleaned.columns:
+        color1 = '#1f77b4'
+        # 'steps-post' accurately represents hourly market clears in a 15-min chart
+        ax1.plot(df_cleaned.index, df_cleaned['DayAheadPrice'], 
+                 label='Day-Ahead Price (EUR/MWh)', color=color1, linewidth=2, drawstyle='steps-post')
+        ax1.set_ylabel('Price [EUR / MWh]', color=color1, fontsize=12, fontweight='bold')
+        ax1.tick_params(axis='y', labelcolor=color1)
+        
+        avg_price = df_cleaned['DayAheadPrice'].mean()
+        ax1.axhline(avg_price, color=color1, linestyle='--', linewidth=1, alpha=0.5, 
+                    label=f'Avg Price: {avg_price:.2f} EUR')
 
-    # Reference lines
-    ax.axhline(0, color='black', linestyle='-', linewidth=0.8, alpha=0.4)
-    avg_price = df_cleaned.iloc[:, 0].mean()
-    ax.axhline(avg_price, color='green', linestyle='--', linewidth=1, alpha=0.5, 
-               label=f'Avg Price: {avg_price:.2f} EUR')
+    # --- AXIS 2 (Right): Actual Load ---
+    ax2 = ax1.twinx()
+    if 'Actual Load' in df_cleaned.columns:
+        color2 = '#ff7f0e'
+        ax2.plot(df_cleaned.index, df_cleaned['Actual Load'], 
+                 label='Actual System Load (MW)', color=color2, linewidth=2, alpha=0.8)
+        
+        # Add light fill beneath the load curve for visual distinction
+        ax2.fill_between(df_cleaned.index, df_cleaned['Actual Load'], 
+                         alpha=0.1, color=color2)
+        
+        ax2.set_ylabel('System Load [MW]', color=color2, fontsize=12, fontweight='bold')
+        ax2.tick_params(axis='y', labelcolor=color2)
+        
+        # Prevent load curve from hitting the absolute bottom of the chart
+        ax2.set_ylim(bottom=df_cleaned['Actual Load'].min() * 0.9)
 
     # Formatting UI
-    ax.set_title(f'NL Day-Ahead Price Integrity Check: {start_date.date()} to {end_date.date()}', 
-                 fontsize=14, fontweight='bold', pad=15)
-    ax.set_ylabel('Price [EUR / MWh]', fontsize=11)
+    ax1.set_title(f'NL Market Dynamics: {start_date.date()} to {end_date.date()} (15-min Resolution)', 
+                  fontsize=14, fontweight='bold', pad=15)
     
     # X-Axis Time Formatting
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%H:%M', tz=tz_local))
-    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=[0, 6, 12, 18]))
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %d\n%H:%M', tz=tz_local))
+    ax1.xaxis.set_major_locator(mdates.HourLocator(byhour=[0, 6, 12, 18]))
     
-    # Add Timestamp at the bottom right
+    # Combine legends from both axes
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', frameon=True)
+    
+    # Timestamp
     timestamp_str = f"Generated at: {current_time.strftime('%Y-%m-%d %H:%M:%S')} ({tz_local})"
     fig.text(0.99, 0.01, timestamp_str, transform=fig.transFigure,
              ha='right', va='bottom', fontsize=9, color='gray', fontstyle='italic')
 
-    plt.legend(loc='upper left', frameon=True, shadow=False)
     plt.tight_layout()
     
-    # Save output
-    output_path = os.path.join(root_path, "scripts", "price_viz_final.png")
-    plt.savefig(output_path, dpi=300)
-    print(f"SUCCESS: Visualization saved to {output_path}")
+    print("SUCCESS: Rendering visualization on screen...")
     plt.show()
 
 if __name__ == "__main__":
