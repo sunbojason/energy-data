@@ -21,7 +21,7 @@ blob_service_client = BlobServiceClient(account_url=account_url, credential=cred
 app = func.FunctionApp()
 
 @app.timer_trigger(schedule="0 0 2 * * *", arg_name="myTimer", run_on_startup=False)
-@app.retry(strategy="fixed_delay", max_retry_count=3, delay_interval="00:05:00")
+@app.retry(strategy="fixed_delay", max_retry_count="3", delay_interval="00:05:00")
 def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
     if not storage_account_name or not blob_service_client:
         logging.error("CRITICAL: Storage configuration is missing.")
