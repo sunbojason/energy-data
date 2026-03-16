@@ -1,11 +1,13 @@
 import os
 import pytest
 import pandas as pd
+import numpy as np
+from typing import cast
 from unittest.mock import patch, MagicMock
 from requests.exceptions import RequestException
 from entsoe.exceptions import NoMatchingDataError
 
-# 1. Direct import of the custom exception and client
+# Importing custom client and exception
 from shared_logic.entsoe_client import EntsoeDataClient, EntsoeAPIError
 
 # --- Fixtures ---
@@ -13,8 +15,7 @@ from shared_logic.entsoe_client import EntsoeDataClient, EntsoeAPIError
 @pytest.fixture(autouse=True)
 def mock_env_key(monkeypatch):
     """
-    Automatically mock the API key for ALL tests in this module.
-    autouse=True prevents accidental external API calls.
+    Ensure a dummy API key is set for all tests to prevent actual network calls.
     """
     monkeypatch.setenv("ENTSOE_API_KEY", "dummy_test_key_123")
 
@@ -29,112 +30,139 @@ def mock_entsoe_pandas_client():
 @pytest.fixture
 def entsoe_client(mock_entsoe_pandas_client):
     """
-    Provides a clean instance of EntsoeDataClient.
-    The internal EntsoePandasClient is automatically patched by the fixture above.
+    Provides an instance of EntsoeDataClient with mocked backend.
     """
     return EntsoeDataClient()
 
 
-# --- Test Cases ---
+# --- Unit Tests for Internal Helper Logic ---
 
-def test_fetch_day_ahead_prices_success(entsoe_client, mock_entsoe_pandas_client):
+def test_align_and_flatten_resampling(entsoe_client):
     """
-    Verify successful retrieval and transformation of Day-Ahead prices.
-    Ensures index integrity and timezone preservation.
-    """
-    tz = 'Europe/Amsterdam'
-    # Use a specific date to test standard behavior
-    mock_timestamps = pd.date_range(start='2026-03-11 00:00', periods=3, freq='h', tz=tz)
-    mock_prices = [45.5, 42.1, 39.8]
-    mock_series = pd.Series(data=mock_prices, index=mock_timestamps)
-    
-    mock_entsoe_pandas_client.query_day_ahead_prices.return_value = mock_series
-
-    start_time = pd.Timestamp('2026-03-11 00:00', tz=tz)
-    end_time = pd.Timestamp('2026-03-11 03:00', tz=tz)
-    
-    result_df = entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
-
-    # Type & Structure Assertions
-    assert isinstance(result_df, pd.DataFrame), "Output must be a DataFrame."
-    assert 'DayAheadPrice' in result_df.columns, "Target column must be correctly named."
-    assert len(result_df) == 3, "Row count mismatch."
-    
-    # Time-Series Integrity Assertions
-    assert isinstance(result_df.index, pd.DatetimeIndex), "Index must be DatetimeIndex."
-    assert str(result_df.index.tz) == tz, f"Timezone must strictly remain {tz}."
-    
-    mock_entsoe_pandas_client.query_day_ahead_prices.assert_called_once_with(
-        'NL', start=start_time, end=end_time
-    )
-
-def test_fetch_day_ahead_prices_no_data(entsoe_client, mock_entsoe_pandas_client):
-    """
-    Verify the client absorbs NoMatchingDataError gracefully,
-    returning an empty DataFrame to prevent pipeline crashes.
-    """
-    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = NoMatchingDataError("API returned nothing")
-
-    start_time = pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')
-    end_time = pd.Timestamp('2026-03-11 01:00', tz='Europe/Amsterdam')
-    
-    result_df = entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
-
-    assert isinstance(result_df, pd.DataFrame), "Must return DataFrame on empty data."
-    assert result_df.empty, "DataFrame must be empty."
-
-@patch("tenacity.nap.time.sleep", return_value=None)  # Bypass tenacity sleep delay for fast tests
-def test_fetch_day_ahead_prices_network_failure(mock_sleep, entsoe_client, mock_entsoe_pandas_client):
-    """
-    Verify that persistent network failures exhaust retries 
-    and raise the custom EntsoeAPIError.
-    """
-    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = RequestException("Connection timeout")
-
-    start_time = pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')
-    end_time = pd.Timestamp('2026-03-11 01:00', tz='Europe/Amsterdam')
-    
-    with pytest.raises(EntsoeAPIError, match="ENTSO-E API failure"):
-        entsoe_client.fetch_day_ahead_prices('NL', start_time, end_time)
-        
-    # Verify retry logic fired at least more than once
-    assert mock_entsoe_pandas_client.query_day_ahead_prices.call_count > 1, "Tenacity retry mechanism failed."
-
-
-# --- Aggregator Test (Multi-dimensional Market Data) ---
-
-def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pandas_client):
-    """
-    Verify the aggregator correctly fetches prices, load, and cross-border flows,
-    and merges them into a single aligned DataFrame.
+    Validate that 1-hour frequency data is correctly upsampled to the 15-min grid.
     """
     tz = 'Europe/Amsterdam'
     idx = pd.date_range(start='2026-03-11 00:00', periods=2, freq='h', tz=tz)
+    df_hourly = pd.DataFrame({'price': [50.0, 60.0]}, index=idx)
     
-    # Mocking different API endpoint responses
-    mock_price_series = pd.Series([50.0, 52.0], index=idx)
-    mock_load_actual = pd.Series([10000.0, 10500.0], index=idx)
-    mock_export_fr = pd.Series([500.0, 400.0], index=idx)
+    df_aligned = entsoe_client._align_and_flatten(df_hourly, "DA")
     
-    mock_entsoe_pandas_client.query_day_ahead_prices.return_value = mock_price_series
-    mock_entsoe_pandas_client.query_load.return_value = mock_load_actual
-    # Setup load forecast to throw NoData to test partial failure resilience
-    mock_entsoe_pandas_client.query_load_forecast.side_effect = NoMatchingDataError("No forecast")
-    mock_entsoe_pandas_client.query_crossborder_flows.return_value = mock_export_fr
+    # Assertions: 1 hour span @ 15-min results in 5 timestamps (00, 15, 30, 45, 60)
+    assert len(df_aligned) == 5 
+    assert df_aligned.columns[0] == "DA_price"
+    assert df_aligned.iloc[1]['DA_price'] == 50.0
 
-    start_time = idx[0]
-    end_time = idx[-1]
+def test_align_and_flatten_duplicate_resolution(entsoe_client):
+    """
+    Verify the logic for resolving duplicate 'imbalance volume' columns.
+    """
+    df_raw = pd.DataFrame({
+        'imbalance volume': [100.0],
+        'imbalance volume.1': [200.0]
+    }, index=[pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')])
     
-    # Execute the comprehensive fetch
-    result_df = entsoe_client.fetch_comprehensive_market_data('NL', start_time, end_time)
+    df_cleaned = entsoe_client._align_and_flatten(df_raw, "Imb")
     
+    assert "Imb_imbalance_short" in df_cleaned.columns
+    assert "Imb_imbalance_long" in df_cleaned.columns
+    assert df_cleaned["Imb_imbalance_long"].iloc[0] == 200.0
+
+
+# --- Aggregator Orchestration Tests ---
+
+def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pandas_client):
+    """
+    Test the full data pipeline: fetching, flattening, and joining into a 15-min grid.
+    """
+    tz = 'Europe/Amsterdam'
+    start_time = pd.Timestamp('2026-03-11 00:00', tz=tz)
+    end_time = pd.Timestamp('2026-03-11 01:00', tz=tz)
+    
+    # Prepare standard indexes
+    idx_15min = pd.date_range(start=start_time, end=end_time, freq='15min', tz=tz)
+    idx_hourly = pd.date_range(start=start_time, end=end_time, freq='h', tz=tz)
+
+    # 1. Mock Day-Ahead Prices (Hourly Series)
+    mock_entsoe_pandas_client.query_day_ahead_prices.return_value = pd.Series([50.0, 55.0], index=idx_hourly)
+    
+    # 2. Mock Actual Load (15-min Series)
+    mock_entsoe_pandas_client.query_load.return_value = pd.Series([10000.0] * 5, index=idx_15min)
+    
+    # 3. Mock Imbalance Volumes (Requires 2 columns to trigger renaming)
+    mock_entsoe_pandas_client.query_imbalance_volumes.return_value = pd.DataFrame({
+        'imbalance volume': [100.0] * 5,
+        'imbalance volume.1': [50.0] * 5
+    }, index=idx_15min)
+
+    # 4. Mock Cross-Border Flows
+    # We provide a generic return value to satisfy the NL neighbors loop (BE, DE_LU, etc.)
+    mock_flow_data = pd.Series([500.0] * 5, index=idx_15min)
+    mock_entsoe_pandas_client.query_crossborder_flows.return_value = mock_flow_data
+    
+    # 5. Prevent warnings for optional features (Forecasts, Balancing State)
+    mock_entsoe_pandas_client.query_load_forecast.return_value = pd.DataFrame()
+    mock_entsoe_pandas_client.query_current_balancing_state.return_value = pd.DataFrame()
+    mock_entsoe_pandas_client.query_contracted_reserve_prices.return_value = pd.DataFrame()
+
+    # Execute
+    result_df = entsoe_client.fetch_comprehensive_market_data(start_time, end_time)
+
     # Assertions
-    assert not result_df.empty, "Aggregator should return data."
+    assert isinstance(result_df, pd.DataFrame)
+    assert len(result_df) == 5
     
-    # Check if the merge aligned columns correctly
-    expected_columns = ['DayAheadPrice', 'Actual Load', 'FR']
-    for col in expected_columns:
-        assert col in result_df.columns, f"Missing expected aggregated column: {col}"
-        
-    # Verify the partial failure didn't crash the merge
-    assert 'Forecasted Load' not in result_df.columns, "Forecast should be safely omitted on error."
+    # Type narrowing for Pylance: assert the index is a DatetimeIndex
+    assert isinstance(result_df.index, pd.DatetimeIndex)
+    dt_index = cast(pd.DatetimeIndex, result_df.index)
+    assert dt_index.freqstr in ['15T', '15min']
+
+    # Verify column naming and prefixes (Series conversion to DataFrame defaults to col 0)
+    assert 'DA_Price_0' in result_df.columns 
+    assert 'Imb_imbalance_short' in result_df.columns
+    assert 'Imb_imbalance_long' in result_df.columns
+    
+    # Verify temporal alignment and forward-filling
+    assert result_df['DA_Price_0'].iloc[1] == 50.0 # Carried from 00:00
+    
+    # Verify aggregation (Neighbors were correctly joined and summed)
+    assert 'Export_Sum' in result_df.columns
+    assert result_df['Export_Sum'].iloc[0] > 0
+
+@patch("tenacity.nap.time.sleep", return_value=None)
+def test_fetch_comprehensive_network_resilience(mock_sleep, entsoe_client, mock_entsoe_pandas_client):
+    """
+    Verify that persistent network errors exhaust retries and raise EntsoeAPIError.
+    """
+    tz = 'Europe/Amsterdam'
+    start = pd.Timestamp('2026-03-11 00:00', tz=tz)
+    end = pd.Timestamp('2026-03-11 01:00', tz=tz)
+    
+    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = RequestException("Timeout")
+
+    with pytest.raises(EntsoeAPIError):
+        entsoe_client.fetch_comprehensive_market_data(start, end)
+    
+    assert mock_entsoe_pandas_client.query_day_ahead_prices.call_count == 3
+
+def test_fetch_comprehensive_empty_scenario(entsoe_client, mock_entsoe_pandas_client):
+    """
+    Verify that if all API calls fail, the master grid index is still returned.
+    """
+    tz = 'Europe/Amsterdam'
+    start = pd.Timestamp('2026-03-11 00:00', tz=tz)
+    end = pd.Timestamp('2026-03-11 01:00', tz=tz)
+    
+    # Mock all queries to return NoMatchingDataError
+    mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = NoMatchingDataError("Empty")
+    mock_entsoe_pandas_client.query_load.side_effect = NoMatchingDataError("Empty")
+    mock_entsoe_pandas_client.query_imbalance_volumes.side_effect = NoMatchingDataError("Empty")
+    mock_entsoe_pandas_client.query_crossborder_flows.side_effect = NoMatchingDataError("Empty")
+
+    result_df = entsoe_client.fetch_comprehensive_market_data(start, end)
+    
+    # Should still return 5 timestamps for the hour on a 15-min grid
+    assert len(result_df) == 5
+    
+    # Aggregates like Export_Sum should be initialized to 0.0 even if no neighbor data found
+    assert 'Export_Sum' in result_df.columns
+    assert result_df['Export_Sum'].sum() == 0.0

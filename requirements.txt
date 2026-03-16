@@ -17,4 +17,7 @@ numpy
 matplotlib
 
 tenacity
+
 pytest
+
+SQLAlchemy

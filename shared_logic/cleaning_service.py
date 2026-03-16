@@ -5,46 +5,73 @@ import logging
 logger = logging.getLogger(__name__)
 
 class CleaningService:
+    """
+    Standardizes and cleans multi-source energy data.
+    Ensures structural integrity for the Azure SQL Database schema.
+    """
+
     @staticmethod
     def clean_energy_data(raw_csv_content: str) -> str:
         if not raw_csv_content or len(raw_csv_content.strip()) == 0:
             return ""
 
         try:
-            # 1. Read Data
+            # 1. Read Data with Timezone Awareness
+            # The index is expected to be a UTC timestamp for database consistency.
             df = pd.read_csv(io.StringIO(raw_csv_content), index_col=0)
             
-            # 2. Enforce UTC Timezone for Database Consistency
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index, utc=True)
 
             if df.empty:
                 return ""
 
-            # 3. Sort and Deduplicate
+            # 2. Structural Discipline: Sort and Deduplicate
+            # Removes potential overlaps from overlapping API fetch windows.
             df = df.sort_index()
             df = df[~df.index.duplicated(keep='first')]
 
-            # 4. ALIGNMENT: Upsample to 15-minute frequency to prevent data loss
-            # '15min' creates a continuous grid of 15-minute intervals
+            # 3. ALIGNMENT: Enforce 15-minute Grid
+            # Resampling to '15min' aligns all features (Prices, Load, Flows) 
+            # to the standard Dutch/Belgian imbalance settlement period (ISP).
             df = df.resample('15min').asfreq()
 
-            # 5. COLUMN-SPECIFIC FILLING STRATEGY
+            # 4. ASSET-BASED FILLING STRATEGY
+            # Different energy assets require different mathematical treatments.
             
-            # Strategy A: Step Functions (Market Prices)
-            # Day-Ahead clears hourly. The XX:00 price is valid for :15, :30, and :45.
-            if 'DayAheadPrice' in df.columns:
-                df['DayAheadPrice'] = df['DayAheadPrice'].ffill(limit=3)
+            # Strategy A: Market-Clearing Prices (Step Functions)
+            # Day-ahead prices are fixed for 60 mins. We forward-fill (ffill)
+            # the hourly value into the subsequent 15-min buckets.
+            price_cols = [col for col in df.columns if col.startswith('DA_')]
+            if price_cols:
+                # Limit to 3 intervals (45 mins) to fill a single hour block
+                df[price_cols] = df[price_cols].ffill(limit=3)
 
-            # Strategy B: Continuous Functions (Physical Grid Load & Flows)
-            # If a 15-min interval is missing, interpolate the physical curve.
-            continuous_cols = [col for col in df.columns if col != 'DayAheadPrice']
+            # Strategy B: Physical Grid Metrics (Continuous Curves)
+            # Load, Generation, and Cross-border flows are physical real-time signals.
+            # Time-based interpolation is more accurate for missing physical snapshots.
+            physical_prefixes = ('Load_', 'Imb_', 'Export_', 'Import_', 'BalState_')
+            continuous_cols = [
+                col for col in df.columns 
+                if col.startswith(physical_prefixes) or col.endswith('_Sum')
+            ]
+            
             if continuous_cols:
-                # Interpolate up to 2 missing 15-min blocks (30 mins of missing data)
-                df[continuous_cols] = df[continuous_cols].interpolate(method='time', limit=2)
+                # Interpolate missing physical data up to 30 mins (2 intervals)
+                # method='time' ensures spacing is respected even if timestamps are non-linear
+                df[continuous_cols] = df[continuous_cols].interpolate(
+                    method='time', 
+                    limit=2
+                )
 
+            # 5. FINAL REFINEMENT
+            # Fill remaining small gaps with 0.0 to prevent SQL NULL constraint violations,
+            # especially for flow-based columns that may be zero by default.
+            df = df.fillna(0.0)
+
+            # Export back to CSV for downstream Blob Storage or SQL ingestion
             return df.to_csv(index=True)
 
         except Exception as e:
-            logger.error(f"Data cleaning failed: {str(e)}")
+            logger.error(f"Data cleaning pipeline failed: {str(e)}")
             raise
