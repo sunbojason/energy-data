@@ -62,7 +62,7 @@ ENTSO-E REST API
 ```
 energy-data/
 ├── function_app.py          # Azure Functions app entry point (V2 model)
-├── debug_blueprint.py       # Debug blueprint for local API testing
+├── blueprints/debug_blueprint.py       # Debug blueprint for local API testing
 ├── shared_logic/
 │   ├── entsoe_client.py     # ENTSO-E API fetching logic
 │   ├── cleaning_service.py  # Data cleaning & time-series processing

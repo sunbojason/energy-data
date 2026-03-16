@@ -2,8 +2,7 @@ import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch, ANY
 import logging
-import function_app
-
+from blueprints.ingestion import timer_trigger_entsoe_ingestion
 from shared_logic.constants import DEFAULT_COUNTRY, DEFAULT_FREQ_GRID, DEFAULT_TIMEZONE
 
 
@@ -14,9 +13,9 @@ def mock_timer():
     timer.past_due = False
     return timer
 
-@patch("function_app.blob_service_client")
-@patch("function_app.storage_account_name", "test_quant_storage")
-@patch("function_app.EntsoeDataClient")
+@patch("blueprints.ingestion.blob_service_client")
+@patch("blueprints.ingestion.storage_account_name", "test_quant_storage")
+@patch("blueprints.ingestion.EntsoeDataClient")
 def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
     Test a successful ingestion flow for comprehensive market data.
@@ -36,8 +35,7 @@ def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_b
     mock_blob_client = MagicMock()
     mock_global_blob_service.get_blob_client.return_value = mock_blob_client
 
-    # Directly call the function without repetitive imports
-    function_app.timer_trigger_entsoe_ingestion(mock_timer)
+    timer_trigger_entsoe_ingestion(mock_timer)
 
     # UPDATED: Verify the new keyword arguments are passed correctly
     mock_client_instance.fetch_comprehensive_market_data.assert_called_once_with(
@@ -61,9 +59,9 @@ def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_b
     assert "INGESTION SUCCESS" in caplog.text
 
 
-@patch("function_app.blob_service_client")
-@patch("function_app.storage_account_name", "test_quant_storage")
-@patch("function_app.EntsoeDataClient")
+@patch("blueprints.ingestion.blob_service_client")
+@patch("blueprints.ingestion.storage_account_name", "test_quant_storage")
+@patch("blueprints.ingestion.EntsoeDataClient")
 def test_timer_trigger_ingestion_no_data(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
     Test scenario where the API returns an empty DataFrame.
@@ -71,16 +69,15 @@ def test_timer_trigger_ingestion_no_data(mock_entsoe_client_class, mock_global_b
     mock_client_instance = mock_entsoe_client_class.return_value
     mock_client_instance.fetch_comprehensive_market_data.return_value = pd.DataFrame()
 
-    # Clean call
-    function_app.timer_trigger_entsoe_ingestion(mock_timer)
+    timer_trigger_entsoe_ingestion(mock_timer)
     
     mock_global_blob_service.get_blob_client.assert_not_called()
     assert "DATA GAP" in caplog.text
 
 
-@patch("function_app.blob_service_client")
-@patch("function_app.storage_account_name", "test_quant_storage")
-@patch("function_app.EntsoeDataClient")
+@patch("blueprints.ingestion.blob_service_client")
+@patch("blueprints.ingestion.storage_account_name", "test_quant_storage")
+@patch("blueprints.ingestion.EntsoeDataClient")
 def test_timer_trigger_ingestion_storage_error(mock_entsoe_client_class, mock_global_blob_service, mock_timer, caplog):
     """
     Test resilience against Azure Storage failures.
@@ -100,17 +97,17 @@ def test_timer_trigger_ingestion_storage_error(mock_entsoe_client_class, mock_gl
 
     # Clean call with context manager
     with pytest.raises(Exception, match="Azure RBAC Identity Authorization Failed"):
-        function_app.timer_trigger_entsoe_ingestion(mock_timer)
+        timer_trigger_entsoe_ingestion(mock_timer)
     
     assert "PIPELINE FAILURE" in caplog.text
 
 
-@patch("function_app.blob_service_client", None)
-@patch("function_app.storage_account_name", None)
+@patch("blueprints.ingestion.blob_service_client", None)
+@patch("blueprints.ingestion.storage_account_name", None)
 def test_timer_trigger_missing_configuration(mock_timer, caplog):
     """
     Test the global configuration safety check.
     """
     # Clean call
-    function_app.timer_trigger_entsoe_ingestion(mock_timer)
+    timer_trigger_entsoe_ingestion(mock_timer)
     assert "CRITICAL: Storage configuration is missing" in caplog.text
