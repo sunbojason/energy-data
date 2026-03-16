@@ -4,6 +4,9 @@ from unittest.mock import MagicMock, patch, ANY
 import logging
 import function_app
 
+from shared_logic.constants import DEFAULT_COUNTRY, DEFAULT_FREQ_GRID, DEFAULT_TIMEZONE
+
+
 @pytest.fixture
 def mock_timer():
     """Mocks the Azure TimerRequest object."""
@@ -26,7 +29,7 @@ def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_b
     # UPDATED: Use column names that reflect the real EntsoeDataClient output.
     mock_df = pd.DataFrame(
         {"DA_Price_0": [45.0] * 96, "Load_Actual_0": [10000.0] * 96}, 
-        index=pd.date_range("2026-03-15", periods=96, freq="15min", tz="Europe/Amsterdam")
+        index=pd.date_range("2026-03-15", periods=96, freq=DEFAULT_FREQ_GRID, tz=DEFAULT_TIMEZONE)
     )
     mock_client_instance.fetch_comprehensive_market_data.return_value = mock_df
 
@@ -40,7 +43,7 @@ def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_b
     mock_client_instance.fetch_comprehensive_market_data.assert_called_once_with(
         start_time=ANY,
         end_time=ANY,
-        target_country='NL'
+        target_country=DEFAULT_COUNTRY
     )
     
     mock_global_blob_service.get_blob_client.assert_called_once_with(
@@ -87,7 +90,7 @@ def test_timer_trigger_ingestion_storage_error(mock_entsoe_client_class, mock_gl
     # UPDATED: Generate 96 rows to cleanly bypass the integrity alert and purely test the storage error
     mock_df = pd.DataFrame(
         {"DA_Price_0": [1.0] * 96},
-        index=pd.date_range("2026-03-15", periods=96, freq="15min", tz="Europe/Amsterdam")
+        index=pd.date_range("2026-03-15", periods=96, freq=DEFAULT_FREQ_GRID, tz=DEFAULT_TIMEZONE)
     )
     mock_client_instance.fetch_comprehensive_market_data.return_value = mock_df
 

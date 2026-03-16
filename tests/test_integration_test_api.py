@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 from shared_logic.entsoe_client import EntsoeDataClient
+from shared_logic.constants import DEFAULT_COUNTRY, DEFAULT_TIMEZONE
+
 
 # Load variables from local.settings.json
 # For a quick test, you can also just set it in the shell: export ENTSOE_API_KEY='...'
@@ -11,18 +13,18 @@ def test_live_api_connection():
     
     # Define a 24-hour window in the recent past
     # Using Amsterdam time as per your Dutch energy focus
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     end_date = pd.Timestamp.now(tz=tz).floor('D')
     start_date = end_date - pd.Timedelta(days=1)
     
-    print(f"Requesting comprehensive market data for NL from {start_date} to {end_date}...")
+    print(f"Requesting comprehensive market data for {DEFAULT_COUNTRY} from {start_date} to {end_date}...")
     
     try:
         # UPDATED: Call the refactored comprehensive method with correct arguments
         df = client.fetch_comprehensive_market_data(
             start_time=start_date,
             end_time=end_date,
-            target_country='NL'
+            target_country=DEFAULT_COUNTRY
         )
         
         if not df.empty:

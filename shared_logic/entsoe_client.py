@@ -7,6 +7,16 @@ from entsoe.exceptions import NoMatchingDataError
 from requests.exceptions import RequestException
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from shared_logic.constants import (
+        DEFAULT_COUNTRY,
+        DEFAULT_FREQ_GRID,
+        DEFAULT_TIMEZONE,
+        MAX_RETRY_ATTEMPTS,
+        NL_NEIGHBORS,
+        RETRY_WAIT_MAX,
+        RETRY_WAIT_MIN,
+    )
+
 class EntsoeAPIError(Exception):
     """
     Custom exception raised when the ENTSO-E API fails to return data 
@@ -22,10 +32,10 @@ class EntsoeDataClient:
             raise ValueError("CRITICAL: ENTSOE_API_KEY environment variable is missing.")
         self.client = EntsoePandasClient(api_key=api_key)
         # Defaulting to Netherlands bidding zone for core strategy execution
-        self.default_country = 'NL'
-        self.freq_grid = '15min'
+        self.default_country = DEFAULT_COUNTRY
+        self.freq_grid = DEFAULT_FREQ_GRID
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
+    @retry(stop=stop_after_attempt(MAX_RETRY_ATTEMPTS), wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX), reraise=True)
     def _safe_query(self, query_method, *args, **kwargs) -> pd.DataFrame:
         """
         Generic wrapper to execute ENTSO-E queries with built-in resilience.
@@ -58,7 +68,7 @@ class EntsoeDataClient:
         """
         Enforces strict structural discipline:
         1. Flattens multi-index columns into SQL-friendly strings.
-        2. Resolves duplicate naming artifacts (e.g., imbalance volume.1).
+        2. Resolves duplicate naming artifacts
         3. Resamples and forward-fills to a strict time grid.
         """
         if df.empty:
@@ -95,12 +105,10 @@ class EntsoeDataClient:
         actual_load = self._safe_query(self.client.query_load, country, start=start_time, end=end_time)
         master_df = master_df.join(self._align_and_flatten(actual_load, 'Load_Actual'), how='left')
 
-        # --- 2. Cross-Border Dynamics (Fixed Neighbors for NL) ---
-        # Removed 'FR' as it doesn't border NL. Added BE, NO, DK.
-        nl_neighbors = ['BE', 'DE_LU', 'GB', 'NO', 'DK'] 
+        # --- 2. Cross-Border Dynamics ---
         export_cols, import_cols = [], []
 
-        for neighbor in nl_neighbors:
+        for neighbor in NL_NEIGHBORS:
             # Export flows
             export_df = self._safe_query(self.client.query_crossborder_flows, country, neighbor, start=start_time, end=end_time)
             if not export_df.empty:
@@ -115,7 +123,7 @@ class EntsoeDataClient:
                 master_df = master_df.join(aligned, how='left')
                 import_cols.extend(aligned.columns.tolist())
 
-        # --- 3. Imbalance & Balancing (Added error protection) ---
+        # --- 3. Imbalance & Balancing ---
         imbalance_vols = self._safe_query(self.client.query_imbalance_volumes, country, start=start_time, end=end_time)
         master_df = master_df.join(self._align_and_flatten(imbalance_vols, 'Imb'), how='left')
 
@@ -140,7 +148,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
     # Example execution scope
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     # Defining a specific execution window
     end = pd.Timestamp.now(tz=tz).floor('h')
     start = end - pd.Timedelta(days=1)

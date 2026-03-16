@@ -9,6 +9,8 @@ from entsoe.exceptions import NoMatchingDataError
 
 # Importing custom client and exception
 from shared_logic.entsoe_client import EntsoeDataClient, EntsoeAPIError
+from shared_logic.constants import DEFAULT_FREQ_GRID, DEFAULT_TIMEZONE
+
 
 # --- Fixtures ---
 
@@ -41,7 +43,7 @@ def test_align_and_flatten_resampling(entsoe_client):
     """
     Validate that 1-hour frequency data is correctly upsampled to the 15-min grid.
     """
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     idx = pd.date_range(start='2026-03-11 00:00', periods=2, freq='h', tz=tz)
     df_hourly = pd.DataFrame({'price': [50.0, 60.0]}, index=idx)
     
@@ -59,7 +61,7 @@ def test_align_and_flatten_duplicate_resolution(entsoe_client):
     df_raw = pd.DataFrame({
         'imbalance volume': [100.0],
         'imbalance volume.1': [200.0]
-    }, index=[pd.Timestamp('2026-03-11 00:00', tz='Europe/Amsterdam')])
+    }, index=[pd.Timestamp('2026-03-11 00:00', tz=DEFAULT_TIMEZONE)])
     
     df_cleaned = entsoe_client._align_and_flatten(df_raw, "Imb")
     
@@ -74,12 +76,12 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     """
     Test the full data pipeline: fetching, flattening, and joining into a 15-min grid.
     """
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     start_time = pd.Timestamp('2026-03-11 00:00', tz=tz)
     end_time = pd.Timestamp('2026-03-11 01:00', tz=tz)
     
     # Prepare standard indexes
-    idx_15min = pd.date_range(start=start_time, end=end_time, freq='15min', tz=tz)
+    idx_15min = pd.date_range(start=start_time, end=end_time, freq=DEFAULT_FREQ_GRID, tz=tz)
     idx_hourly = pd.date_range(start=start_time, end=end_time, freq='h', tz=tz)
 
     # 1. Mock Day-Ahead Prices (Hourly Series)
@@ -114,7 +116,7 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     # Type narrowing for Pylance: assert the index is a DatetimeIndex
     assert isinstance(result_df.index, pd.DatetimeIndex)
     dt_index = cast(pd.DatetimeIndex, result_df.index)
-    assert dt_index.freqstr in ['15T', '15min']
+    assert dt_index.freqstr in ['15T', '15min', DEFAULT_FREQ_GRID]
 
     # Verify column naming and prefixes (Series conversion to DataFrame defaults to col 0)
     assert 'DA_Price_0' in result_df.columns 
@@ -133,7 +135,7 @@ def test_fetch_comprehensive_network_resilience(mock_sleep, entsoe_client, mock_
     """
     Verify that persistent network errors exhaust retries and raise EntsoeAPIError.
     """
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     start = pd.Timestamp('2026-03-11 00:00', tz=tz)
     end = pd.Timestamp('2026-03-11 01:00', tz=tz)
     
@@ -148,7 +150,7 @@ def test_fetch_comprehensive_empty_scenario(entsoe_client, mock_entsoe_pandas_cl
     """
     Verify that if all API calls fail, the master grid index is still returned.
     """
-    tz = 'Europe/Amsterdam'
+    tz = DEFAULT_TIMEZONE
     start = pd.Timestamp('2026-03-11 00:00', tz=tz)
     end = pd.Timestamp('2026-03-11 01:00', tz=tz)
     

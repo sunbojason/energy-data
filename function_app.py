@@ -8,6 +8,8 @@ from azure.storage.blob import BlobServiceClient
 
 from shared_logic.entsoe_client import EntsoeDataClient
 from shared_logic.cleaning_service import CleaningService
+from shared_logic.constants import DEFAULT_COUNTRY, DEFAULT_TIMEZONE
+
 
 # --- Global Initialization (Singleton Pattern) ---
 # Utilizing Managed Identity (DefaultAzureCredential) as noted in the PDF requirements.
@@ -36,14 +38,14 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
 
     try:
         client = EntsoeDataClient()
-        tz = 'Europe/Amsterdam'
+        tz = DEFAULT_TIMEZONE
         # Define window: Yesterday 00:00 to Today 00:00
         end_date = pd.Timestamp.now(tz=tz).floor('D')
         start_date = end_date - pd.Timedelta(days=1)
 
         # FIX 1: Use the correct parameter name (target_country instead of country_code)
         # Using default 'NL' as specified in the client logic
-        data_df = client.fetch_comprehensive_market_data(start_time=start_date, end_time=end_date, target_country='NL')
+        data_df = client.fetch_comprehensive_market_data(start_time=start_date, end_time=end_date, target_country=DEFAULT_COUNTRY)
 
         if data_df is None or data_df.empty:
             # Applying "allow small miss, prevent cascade failure" principle

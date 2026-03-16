@@ -6,13 +6,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-# 1. Dynamic path injection to locate 'shared_logic'
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if root_path not in sys.path:
     sys.path.insert(0, root_path)
 
 from shared_logic.entsoe_client import EntsoeDataClient
 from shared_logic.cleaning_service import CleaningService
+from shared_logic.constants import DEFAULT_TIMEZONE
 
 def load_environment_config():
     """Load settings from local.settings.json into environment variables."""
@@ -28,8 +28,7 @@ def run_price_visualization():
     load_environment_config()
     client = EntsoeDataClient()
     
-    # Define window (Last 3 days) aligned with Amsterdam time
-    tz_local = 'Europe/Amsterdam'
+    tz_local = DEFAULT_TIMEZONE
     current_time = pd.Timestamp.now(tz=tz_local)
     end_date = current_time.ceil('h')
     start_date = end_date - pd.Timedelta(days=3)
@@ -46,7 +45,6 @@ def run_price_visualization():
         print("WARNING: No data returned from API.")
         return
 
-    # 2. Process through CleaningService (Enforces 15-min alignment and filling strategies)
     print("STATUS: Applying 15-minute resampling and asset-specific filling logic...")
     raw_csv_buffer = raw_df.to_csv()
     cleaned_csv_str = CleaningService.clean_energy_data(raw_csv_buffer)
@@ -56,7 +54,6 @@ def run_price_visualization():
     if not df_cleaned.empty:
         df_cleaned.index = pd.to_datetime(df_cleaned.index).tz_convert(tz_local)
 
-    # 3. Visualization: Dual-Axis Chart
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax1 = plt.subplots(figsize=(14, 7))
     

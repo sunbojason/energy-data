@@ -2,6 +2,11 @@ import pandas as pd
 import io
 import logging
 
+try:
+    from shared_logic.constants import DEFAULT_FREQ_GRID
+except ImportError:
+    from constants import DEFAULT_FREQ_GRID
+
 logger = logging.getLogger(__name__)
 
 class CleaningService:
@@ -34,7 +39,7 @@ class CleaningService:
             # 3. ALIGNMENT: Enforce 15-minute Grid
             # Resampling to '15min' aligns all features (Prices, Load, Flows) 
             # to the standard Dutch/Belgian imbalance settlement period (ISP).
-            df = df.resample('15min').asfreq()
+            df = df.resample(DEFAULT_FREQ_GRID).asfreq()
 
             # 4. ASSET-BASED FILLING STRATEGY
             # Different energy assets require different mathematical treatments.

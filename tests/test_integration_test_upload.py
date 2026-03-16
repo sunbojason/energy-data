@@ -6,6 +6,9 @@ from datetime import datetime
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import ResourceExistsError, AzureError
 
+from shared_logic.constants import DEFAULT_FREQ_GRID
+
+
 # Configure the standard logger
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +26,7 @@ def generate_mock_energy_data() -> pd.DataFrame:
     
     # 96 periods for a standard 24-hour day in 15-min intervals
     start_time = datetime.now().replace(minute=0, second=0, microsecond=0)
-    time_index = pd.date_range(start=start_time, periods=96, freq='15min')
+    time_index = pd.date_range(start=start_time, periods=96, freq=DEFAULT_FREQ_GRID)
 
     np.random.seed(42) 
     
