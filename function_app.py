@@ -10,6 +10,7 @@ from shared_logic.entsoe_client import EntsoeDataClient
 from shared_logic.cleaning_service import CleaningService
 from shared_logic.constants import DEFAULT_COUNTRY, DEFAULT_TIMEZONE
 
+from debug_blueprint import debug_bp
 
 # --- Global Initialization (Singleton Pattern) ---
 # Utilizing Managed Identity (DefaultAzureCredential) as noted in the PDF requirements.
@@ -22,6 +23,8 @@ account_url = f"https://{storage_account_name}.blob.core.windows.net" if storage
 blob_service_client = BlobServiceClient(account_url=account_url, credential=credential) if account_url else None
 
 app = func.FunctionApp()
+app.register_blueprint(debug_bp)
+
 
 @app.timer_trigger(schedule="0 0 2 * * *", arg_name="myTimer", run_on_startup=False)
 @app.retry(strategy="fixed_delay", max_retry_count="3", delay_interval="00:05:00")

@@ -62,6 +62,7 @@ ENTSO-E REST API
 ```
 energy-data/
 ├── function_app.py          # Azure Functions app entry point (V2 model)
+├── debug_blueprint.py       # Debug blueprint for local API testing
 ├── shared_logic/
 │   ├── entsoe_client.py     # ENTSO-E API fetching logic
 │   ├── cleaning_service.py  # Data cleaning & time-series processing
@@ -170,11 +171,9 @@ energy-data/
    ```bash
    func start
    ```
-   Since the ingestion is normally triggered by a timer, use the following Administrative API call to trigger it immediately for testing:
+   Since the ingestion is normally triggered by a timer, use the following API call to trigger it immediately for testing:
    ```bash
-   curl -v -X POST http://localhost:7071/admin/functions/timer_trigger_entsoe_ingestion \
-      -H "Content-Type: application/json" \
-      -d "{}"
+   curl http://localhost:7071/api/manual_run
    ``` 
 
 ---
