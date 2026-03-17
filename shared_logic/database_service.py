@@ -21,7 +21,7 @@ class DatabaseService:
             f"SERVER={self.server};"
             f"DATABASE={self.database};"
             f"Encrypt=yes;"
-            f"TrustServerCertificate=no;"
+            f"TrustServerCertificate=yes;"
             f"Connection Timeout=30"
         )
         

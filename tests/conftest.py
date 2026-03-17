@@ -23,8 +23,6 @@ def load_azure_settings():
                     # Only set if not already in environment to avoid conflicts
                     if key not in os.environ:
                         os.environ[key] = str(value)
-            # Optional: Verify it's working in logs
-            # print(f"\nDEBUG: Loaded ENTSOE_API_KEY from {settings_path}") 
         except Exception as e:
             logging.error(f"Failed to parse local.settings.json: {e}")
     else:

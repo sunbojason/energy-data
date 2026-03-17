@@ -20,4 +20,5 @@ tenacity
 
 pytest
 
+pyodbc
 SQLAlchemy

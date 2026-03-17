@@ -22,27 +22,27 @@ For detailed setup instructions, see the **Getting Started** section below.
 
 ## 📐 Architecture Overview
 
-This project follows a **Medallion-lite architecture** orchestrated by Azure Functions:
+This project follows a **Medallion-lite architecture** orchestrated entirely by Azure Functions:
 
 ```
 ENTSO-E REST API
        │
        ▼  (Timer Trigger — scheduled)
-┌─────────────────────┐
-│  Ingestion Function  │  ── fetches raw data via entsoe-py
-└─────────────────────┘
+┌──────────────────────┐
+│  Ingestion Function  │
+└──────────────────────┘
        │
        ▼  CSV → raw-data (Blob Storage)
-┌─────────────────────┐
-│  Processing Function │  ── triggered by Blob arrival
-└─────────────────────┘
+┌──────────────────────┐
+│   Cleaning Function  │  ── triggered by Blob arrival
+└──────────────────────┘
        │
        ▼  CSV → cleaned-data (Blob Storage)
-┌─────────────────────┐
-│  Azure Data Factory  │  ── upserts cleaned CSVs
-└─────────────────────┘
+┌─────────────────────────┐
+│  Warehousing Function   │  ── triggered by Blob arrival
+└─────────────────────────┘
        │
-       ▼
+       ▼  (SQLAlchemy)
   Azure SQL Database
   └── table: entsoe
 ```
@@ -52,8 +52,8 @@ ENTSO-E REST API
 | Stage | Trigger | Input | Output |
 |---|---|---|---|
 | **Ingestion** | Timer (scheduled) | ENTSO-E REST API | `raw-data/` container (CSV) |
-| **Processing** | Blob Trigger (new file) | `raw-data/` CSV | `cleaned-data/` container (CSV) |
-| **Warehousing** | ADF Pipeline | `cleaned-data/` CSV | `entsoe` SQL table (upsert) |
+| **Cleaning** | Blob Trigger (new file) | `raw-data/` CSV | `cleaned-data/` container (CSV) |
+| **Warehousing** | Blob Trigger (new file) | `cleaned-data/` CSV | `entsoe` SQL table (append) |
 
 ---
 
@@ -65,11 +65,13 @@ energy-data/
 ├── blueprints/              # Function blueprints
 │   ├── ingestion.py         # Timer-triggered function for data ingestion
 │   ├── cleaning.py          # Blob-triggered function for data cleaning
+│   ├── warehouse.py         # Blob-triggered function for SQL warehousing
 │   ├── debug.py             # HTTP-triggered functions for debugging
 │   └── __init__.py
 ├── shared_logic/
 │   ├── azure_clients.py     # Clients for Azure services (e.g., Blob Storage)
 │   ├── cleaning_service.py  # Data cleaning & time-series processing
+│   ├── database_service.py  # SQLAlchemy logic for database operations
 │   ├── constants.py         # Shared constants (container names, regions, etc.)
 │   ├── entsoe_client.py     # ENTSO-E API fetching logic
 │   └── __init__.py
@@ -77,20 +79,7 @@ energy-data/
 │   ├── visualize_prices.py  # Utility script for data visualization
 │   └── __init__.py
 ├── tests/                   # Unit and integration tests
-│   ├── conftest.py          # Pytest configuration and fixtures
-│   ├── test_cleaning_blueprint.py
-│   ├── test_cleaning_service.py
-│   ├── test_entsoe_client.py
-│   ├── test_ingestion_blueprint.py
-│   ├── test_integration_test_api.py
-│   └── test_integration_test_upload.py
-├── .vscode/
-│   └── extensions.json      # Recommended VS Code extensions
-├── host.json                # Azure Functions host configuration
-├── local.settings.json      # Local environment variables (not committed)
-├── pyproject.toml           # Python project config and pytest settings
-├── requirements.txt         # Python dependencies
-└── .funcignore              # Files ignored by Azure Functions deployment
+...
 ```
 
 > ⚙️ Business logic is intentionally isolated from Azure bindings to simplify testing and reusability.
@@ -105,9 +94,10 @@ energy-data/
 | **Serverless Framework** | Azure Functions — Python V2 Programming Model |
 | **API Client** | `entsoe-py` |
 | **Data Processing** | `pandas`, `numpy` |
+| **Database ORM** | `SQLAlchemy` |
+| **Database Driver**| `pyodbc` |
 | **Cloud Storage I/O** | `azure-storage-blob` |
 | **Identity & Auth** | `azure-identity` (Managed Identity) |
-| **Warehouse Ingestion** | Azure Data Factory |
 | **Database** | Azure SQL Database |
 | **Hosting Plan** | Flex Consumption |
 | **Local Dev** | VS Code + Azure Functions Core Tools |
@@ -122,6 +112,7 @@ energy-data/
 - [Azure Functions Core Tools v4](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
 - An active [ENTSO-E API key](https://transparency.entsoe.eu/usrm/user/myAccountSettings)
 - Azure Storage Account with `raw-data` and `cleaned-data` containers
+- Azure SQL Database
 
 ### Local Setup
 
@@ -147,7 +138,7 @@ energy-data/
 
 4. **Configure local settings**
 
-   Populate `local.settings.json` with your Azure Storage and ENTSO-E credentials:
+   Populate `local.settings.json` with your credentials:
 
    ```json
    {
@@ -157,19 +148,12 @@ energy-data/
        "AzureWebJobsStorage": "<your-storage-account-connection-string>",
        "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>",
        "RAW_DATA_CONTAINER": "raw-data",
-       "ENTSOE_API_KEY": "<your-entsoe-api-key>"
+       "ENTSOE_API_KEY": "<your-entsoe-api-key>",
+       "SQL_SERVER_NAME": "tcp:<your-sql-server-name>.database.windows.net,1433",
+       "SQL_DATABASE_NAME": "<your-sql-database-name>"
      }
    }
    ```
-
-   **Configuration keys:**
-   - `FUNCTIONS_WORKER_RUNTIME` — Python runtime identifier
-   - `AzureWebJobsStorage` — Full connection string to your storage account
-   - `STORAGE_ACCOUNT_NAME` — Storage account name (used for blob client initialization)
-   - `RAW_DATA_CONTAINER` — Container name for raw ingested data
-   - `ENTSOE_API_KEY` — Your ENTSO-E Transparency Platform API key
-
-   > ⚠️ `local.settings.json` is git-ignored. Never commit secrets or connection strings to source control.
 
 5. **Run locally**
 
@@ -201,11 +185,12 @@ Timestamps are preserved as the DataFrame index during all CSV transformations (
 ### 2. Modular Logic
 Business logic is decoupled from Azure trigger bindings:
 
-- `entsoe_client.py` — API fetching (testable in isolation)
-- `cleaning_service.py` — Data cleaning (testable in isolation)
+- `entsoe_client.py` — API fetching
+- `cleaning_service.py` — Data cleaning
+- `database_service.py` — SQL warehousing
 - `function_app.py` — Azure trigger wiring only
 
-This separation facilitates unit testing and CI/CD pipelines.
+This separation facilitates unit testing.
 
 ### 3. Identity-Based Security
 Managed Identity is used throughout, eliminating hardcoded credentials and reducing the attack surface in production.
@@ -219,8 +204,6 @@ Tests are located in the `tests/` directory. Run them with:
 ```bash
 pytest tests/
 ```
-
-> 🔍 The test suite covers individual services as well as end-to-end scenarios via `test_integration_test_api.py`.
 
 ---
 
@@ -240,7 +223,7 @@ Or use the **Azure Functions** VS Code extension for GUI-driven deployment.
 
 ## 📡 Data Source
 
-All electricity transmission and generation data is sourced from the **ENTSO-E Transparency Platform** — the authoritative source for European energy market data, covering 35+ countries.
+All electricity transmission and generation data is sourced from the **ENTSO-E Transparency Platform**.
 
 - Platform: [transparency.entsoe.eu](https://transparency.entsoe.eu)
 - API Docs: [ENTSO-E REST API](https://transparency.entsoe.eu/content/static_content/Static%20content/web%20api/Guide.html)
@@ -250,4 +233,4 @@ All electricity transmission and generation data is sourced from the **ENTSO-E T
 
 ## 📄 License
 
-This project is released under the MIT License. See [LICENSE](LICENSE) for details.
+This project is released under the MIT License.

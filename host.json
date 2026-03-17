@@ -6,6 +6,16 @@
         "isEnabled": true,
         "excludedTypes": "Request"
       }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Host.Results": "Error",
+      "Function": "Information",
+      "Host.Aggregator": "Information",
+      "blueprints": "Information",
+      "shared_logic": "Debug",
+      "azure.core": "Warning",
+      "azure.storage.blob": "Information"
     }
   },
   "extensionBundle": {
