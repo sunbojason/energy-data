@@ -57,50 +57,6 @@ ENTSO-E REST API
 
 ---
 
-## 🗂️ Project Structure
-
-```
-energy-data/
-├── function_app.py          # Azure Functions app entry point (V2 model)
-├── blueprints/              # Function blueprints
-│   ├── ingestion.py         # Timer-triggered function for data ingestion
-│   ├── cleaning.py          # Blob-triggered function for data cleaning
-│   ├── warehouse.py         # Blob-triggered function for SQL warehousing
-│   ├── debug.py             # HTTP-triggered functions for debugging
-│   └── __init__.py
-├── shared_logic/
-│   ├── azure_clients.py     # Clients for Azure services (e.g., Blob Storage)
-│   ├── cleaning_service.py  # Data cleaning & time-series processing
-│   ├── database_service.py  # SQLAlchemy logic for database operations
-│   ├── constants.py         # Shared constants (container names, regions, etc.)
-│   ├── entsoe_client.py     # ENTSO-E API fetching logic
-│   └── __init__.py
-├── scripts/
-│   ├── visualize_prices.py  # Utility script for data visualization
-│   └── __init__.py
-├── tests/                   # Unit and integration tests
-│   ├── __init__.py
-│   ├── conftest.py          # Pytest configuration and fixtures
-│   ├── test_cleaning_blueprint.py
-│   ├── test_cleaning_service.py
-│   ├── test_entsoe_client.py
-│   ├── test_ingestion_blueprint.py
-│   ├── test_integration_api.py
-│   ├── test_integration_sql_connectivity.py
-│   └── test_integration_upload.py
-├── .vscode/
-│   └── extensions.json      # Recommended VS Code extensions
-├── host.json                # Azure Functions host configuration
-├── local.settings.json      # Local environment variables (not committed)
-├── pyproject.toml           # Python project config and pytest settings
-├── requirements.txt         # Python dependencies
-└── .funcignore              # Files ignored by Azure Functions deployment
-```
-
-> ⚙️ Business logic is intentionally isolated from Azure bindings to simplify testing and reusability.
-
----
-
 ## 🛠️ Tech Stack
 
 | Component | Technology |
@@ -164,7 +120,7 @@ energy-data/
        "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>",
        "RAW_DATA_CONTAINER": "raw-data",
        "ENTSOE_API_KEY": "<your-entsoe-api-key>",
-       "SQL_SERVER_NAME": "tcp:<your-sql-server-name>.database.windows.net,1433",
+       "SQL_SERVER_NAME": "<your-sql-server-name>.database.windows.net",
        "SQL_DATABASE_NAME": "<your-sql-database-name>"
      }
    }
