@@ -79,7 +79,22 @@ energy-data/
 │   ├── visualize_prices.py  # Utility script for data visualization
 │   └── __init__.py
 ├── tests/                   # Unit and integration tests
-...
+│   ├── __init__.py
+│   ├── conftest.py          # Pytest configuration and fixtures
+│   ├── test_cleaning_blueprint.py
+│   ├── test_cleaning_service.py
+│   ├── test_entsoe_client.py
+│   ├── test_ingestion_blueprint.py
+│   ├── test_integration_api.py
+│   ├── test_integration_sql_connectivity.py
+│   └── test_integration_upload.py
+├── .vscode/
+│   └── extensions.json      # Recommended VS Code extensions
+├── host.json                # Azure Functions host configuration
+├── local.settings.json      # Local environment variables (not committed)
+├── pyproject.toml           # Python project config and pytest settings
+├── requirements.txt         # Python dependencies
+└── .funcignore              # Files ignored by Azure Functions deployment
 ```
 
 > ⚙️ Business logic is intentionally isolated from Azure bindings to simplify testing and reusability.
@@ -154,6 +169,7 @@ energy-data/
      }
    }
    ```
+   > ⚠️ `local.settings.json` is git-ignored. Never commit secrets or connection strings to source control
 
 5. **Run locally**
 
@@ -163,6 +179,9 @@ energy-data/
    Since the ingestion is normally triggered by a timer, use the following API call to trigger it immediately for testing:
    ```bash
    curl http://localhost:7071/api/manual_run
+   ``` 
+   ```bash
+   curl "http://localhost:7071/api/manual_run?date=2026-03-12"
    ``` 
 
 ---
