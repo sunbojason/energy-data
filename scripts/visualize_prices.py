@@ -33,7 +33,7 @@ def run_price_visualization():
     end_date = current_time.ceil('h')
     start_date = end_date - pd.Timedelta(days=3)
     
-    print(f"STATUS: Fetching comprehensive market data for NL from {start_date} to {end_date}...")
+    print(f"STATUS: Fetching comprehensive market data for BE from {start_date} to {end_date}...")
     try:
         # Refactored call: start_time and end_time are positional; target_country is optional
         raw_df = client.fetch_comprehensive_market_data(start_time=start_date, end_time=end_date)
@@ -92,7 +92,7 @@ def run_price_visualization():
             ax2.set_ylim(bottom=df_cleaned[target_load].min() * 0.9)
 
     # Formatting UI
-    ax1.set_title(f'NL Market Dynamics: {start_date.date()} to {end_date.date()} (15-min Alignment)', 
+    ax1.set_title(f'BE Market Dynamics: {start_date.date()} to {end_date.date()} (15-min Alignment)', 
                   fontsize=14, fontweight='bold', pad=15)
     
     # X-Axis Time Formatting

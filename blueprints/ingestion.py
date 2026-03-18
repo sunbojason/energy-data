@@ -19,7 +19,7 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
         logging.error("CRITICAL: Storage configuration is missing. Ensure STORAGE_ACCOUNT_NAME is set.")
         return
 
-    logging.info("Starting scheduled ingestion for comprehensive NL market data (15-min grid).")
+    logging.info("Starting scheduled ingestion for comprehensive BE market data (15-min grid).")
 
     try:
         client = EntsoeDataClient()
@@ -29,7 +29,7 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
         start_date = end_date - pd.Timedelta(days=1)
 
         # FIX 1: Use the correct parameter name (target_country instead of country_code)
-        # Using default 'NL' as specified in the client logic
+        # Using default 'BE' as specified in the client logic
         data_df = client.fetch_comprehensive_market_data(start_time=start_date, end_time=end_date, target_country=DEFAULT_COUNTRY)
 
         if data_df is None or data_df.empty:
@@ -46,7 +46,7 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
             logging.warning(f"INTEGRITY ALERT: Expected at least {expected_min_rows} rows for a 15-min grid, but got {actual_rows}.")
 
         container_name = os.environ.get("RAW_DATA_CONTAINER", "raw-data")
-        file_name = f"nl_market_data_{start_date.strftime('%Y%m%d')}.csv"
+        file_name = f"be_market_data_{start_date.strftime('%Y%m%d')}.csv"
         
         # Write to Blob Storage
         blob_client = blob_service_client.get_blob_client(container=container_name, blob=file_name)
