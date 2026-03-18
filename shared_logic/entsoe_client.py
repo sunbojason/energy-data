@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import logging
 from typing import List, Dict
@@ -149,8 +150,44 @@ class EntsoeDataClient:
 
         # Fill small gaps (max 30 mins) with ffill, then 0.0 for remaining missing data
         master_df = master_df.ffill(limit=2).fillna(0.0)
+        master_df = self.finalize_dataframe_structure(master_df)
         
         logging.info(f"Pipeline execution completed. Total rows: {len(master_df)}")
+        return master_df
+    
+    def finalize_dataframe_structure(self,master_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Applies strict quantitative data discipline to the final DataFrame before storage.
+        Flattens any Pandas MultiIndex columns (like ('Down', 1, 'Activated')) 
+        and ensures the timestamp index is securely converted to a named column.
+        """
+        logging.info("Formatting final DataFrame structure for SQL compatibility...")
+
+        # 1. Flatten MultiIndex columns if they exist (crucial for relational databases)
+        if isinstance(master_df.columns, pd.MultiIndex):
+            # Join tuple elements with an underscore, ignoring empty strings
+            master_df.columns = [
+                '_'.join([str(c) for c in col if str(c).strip()]) 
+                for col in master_df.columns.values
+            ]
+            logging.info("Successfully flattened MultiIndex columns.")
+
+        # 2. Clean up default suffixes from entsoe-py (e.g., DA_Price_0 -> DA_Price)
+        clean_columns = {
+            col: re.sub(r'\s*_0$', '', str(col)) 
+            for col in master_df.columns
+        }
+        
+        master_df.rename(columns=clean_columns, inplace=True)
+
+        # 3. Secure the Timestamp Index
+        # We use 'Time_UTC' to avoid SQL Server 'timestamp' keyword conflict
+        if isinstance(master_df.index, pd.DatetimeIndex):
+            master_df.index.name = 'Time_UTC'  # Changed from 'timestamp'
+            master_df = master_df.reset_index()
+            # Ensure we drop any residual 'Unnamed' columns if they exist
+            master_df = master_df.loc[:, ~master_df.columns.str.contains('^Unnamed')]
+            logging.info("Time index secured as 'Time_UTC' and 'Unnamed' columns purged.")
         return master_df
 
 if __name__ == "__main__":

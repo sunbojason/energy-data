@@ -48,24 +48,40 @@ class DatabaseService:
 
     def upsert_energy_data(self, df: pd.DataFrame, table_name: str = "entsoe"):
         """
-        Inserts the cleaned DataFrame into the Azure SQL database.
-        Includes safeguards against empty payloads and index loss.
+        Inserts the cleaned DataFrame into Azure SQL with strict keyword guarding.
         """
         if df is None or df.empty:
             logging.warning("Execution halted: Empty DataFrame provided to DatabaseService.")
             return
 
         try:
-            logging.info(f"Attempting to insert {len(df)} records into '{table_name}'.")
-            
-            # Defensive copy to avoid altering the upstream dataframe
+            # 1. Defensive copy
             df_to_insert = df.copy()
             
-            # Structural discipline: Ensure the timestamp index is preserved as a column
+            # 2. Handle the Index (The "Time Preservation" step)
+            # If time is in the index, move it to a real column named 'Time_UTC'
             if isinstance(df_to_insert.index, pd.DatetimeIndex):
+                df_to_insert.index.name = 'Time_UTC'
                 df_to_insert = df_to_insert.reset_index()
             
-            # Using 'append' to push data. 
+            # 3. Clean up Column Names (The "Anti-Conflict" step)
+            # Rename 'timestamp' to 'Time_UTC' to avoid SQL Server keyword error
+            # Also remove any 'Unnamed' columns leaked from CSV/Index issues
+            df_to_insert.columns = [str(c) for c in df_to_insert.columns]
+            
+            rename_map = {
+                'timestamp': 'Time_UTC',
+                'index': 'Time_UTC'
+            }
+            df_to_insert.rename(columns=rename_map, inplace=True)
+            
+            # Remove redundant 'Unnamed' columns
+            cols_to_keep = [c for c in df_to_insert.columns if not c.startswith('Unnamed')]
+            df_to_insert = df_to_insert[cols_to_keep]
+
+            logging.info(f"Inserting {len(df_to_insert)} rows. Columns: {list(df_to_insert.columns)}")
+
+            # 4. Use index=False because time is now a regular column 'Time_UTC'
             df_to_insert.to_sql(
                 name=table_name, 
                 con=self.engine, 

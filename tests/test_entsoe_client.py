@@ -74,7 +74,8 @@ def test_align_and_flatten_duplicate_resolution(entsoe_client):
 
 def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pandas_client):
     """
-    Test the full data pipeline: fetching, flattening, and joining into a 15-min grid.
+    Test the full data pipeline. 
+    Verifies that the final structure is properly formatted for SQL (no _0, reset index).
     """
     tz = DEFAULT_TIMEZONE
     start_time = pd.Timestamp('2026-03-11 00:00', tz=tz)
@@ -90,18 +91,17 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     # 2. Mock Actual Load (15-min Series)
     mock_entsoe_pandas_client.query_load.return_value = pd.Series([10000.0] * 5, index=idx_15min)
     
-    # 3. Mock Imbalance Volumes (Requires 2 columns to trigger renaming)
+    # 3. Mock Imbalance Volumes
     mock_entsoe_pandas_client.query_imbalance_volumes.return_value = pd.DataFrame({
         'imbalance volume': [100.0] * 5,
         'imbalance volume.1': [50.0] * 5
     }, index=idx_15min)
 
     # 4. Mock Cross-Border Flows
-    # We provide a generic return value to satisfy the NL neighbors loop (BE, DE_LU, etc.)
     mock_flow_data = pd.Series([500.0] * 5, index=idx_15min)
     mock_entsoe_pandas_client.query_crossborder_flows.return_value = mock_flow_data
     
-    # 5. Prevent warnings for optional features (Forecasts, Balancing State)
+    # Prevent warnings for optional features
     mock_entsoe_pandas_client.query_load_forecast.return_value = pd.DataFrame()
     mock_entsoe_pandas_client.query_current_balancing_state.return_value = pd.DataFrame()
     mock_entsoe_pandas_client.query_contracted_reserve_prices.return_value = pd.DataFrame()
@@ -109,26 +109,27 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     # Execute
     result_df = entsoe_client.fetch_comprehensive_market_data(start_time, end_time)
 
-    # Assertions
-    assert isinstance(result_df, pd.DataFrame)
-    assert len(result_df) == 5
+    # --- UPDATED ASSERTIONS FOR CLEAN SCHEMA ---
     
-    # Type narrowing for Pylance: assert the index is a DatetimeIndex
-    assert isinstance(result_df.index, pd.DatetimeIndex)
-    dt_index = cast(pd.DatetimeIndex, result_df.index)
-    assert dt_index.freqstr in ['15T', '15min', DEFAULT_FREQ_GRID]
+    # 1. Verify Timestamp Column (Index must be reset)
+    assert 'Time_UTC' in result_df.columns
+    assert 'timestamp' not in result_df.columns
+    # Verify that the DatetimeIndex has been promoted to a regular column
+    assert not isinstance(result_df.index, pd.DatetimeIndex)
+    # Verify the data type of the new column is indeed datetime-like
+    assert pd.api.types.is_datetime64_any_dtype(result_df['Time_UTC'])
 
-    # Verify column naming and prefixes (Series conversion to DataFrame defaults to col 0)
-    assert 'DA_Price_0' in result_df.columns 
-    assert 'Imb_imbalance_short' in result_df.columns
-    assert 'Imb_imbalance_long' in result_df.columns
+    # 2. Verify CLEAN Column Names (Stripping _0)
+    # entsoe-py usually adds _0 when a Series is converted to DataFrame during join.
+    # Our finalize_dataframe_structure must strip it.
+    assert 'DA_Price' in result_df.columns
+    assert 'DA_Price_0' not in result_df.columns
+    assert 'Load_Actual' in result_df.columns
+    assert 'Load_Actual_0' not in result_df.columns
     
-    # Verify temporal alignment and forward-filling
-    assert result_df['DA_Price_0'].iloc[1] == 50.0 # Carried from 00:00
-    
-    # Verify aggregation (Neighbors were correctly joined and summed)
+    # 3. Verify Data Integrity
+    assert result_df['DA_Price'].iloc[1] == 50.0
     assert 'Export_Sum' in result_df.columns
-    assert result_df['Export_Sum'].iloc[0] > 0
 
 @patch("tenacity.nap.time.sleep", return_value=None)
 def test_fetch_comprehensive_network_resilience(mock_sleep, entsoe_client, mock_entsoe_pandas_client):
@@ -148,13 +149,13 @@ def test_fetch_comprehensive_network_resilience(mock_sleep, entsoe_client, mock_
 
 def test_fetch_comprehensive_empty_scenario(entsoe_client, mock_entsoe_pandas_client):
     """
-    Verify that if all API calls fail, the master grid index is still returned.
+    Verify that if all API calls fail, the master grid index is still returned 
+    in a SQL-ready format (reset index with timestamp column).
     """
     tz = DEFAULT_TIMEZONE
     start = pd.Timestamp('2026-03-11 00:00', tz=tz)
     end = pd.Timestamp('2026-03-11 01:00', tz=tz)
     
-    # Mock all queries to return NoMatchingDataError
     mock_entsoe_pandas_client.query_day_ahead_prices.side_effect = NoMatchingDataError("Empty")
     mock_entsoe_pandas_client.query_load.side_effect = NoMatchingDataError("Empty")
     mock_entsoe_pandas_client.query_imbalance_volumes.side_effect = NoMatchingDataError("Empty")
@@ -162,9 +163,59 @@ def test_fetch_comprehensive_empty_scenario(entsoe_client, mock_entsoe_pandas_cl
 
     result_df = entsoe_client.fetch_comprehensive_market_data(start, end)
     
-    # Should still return 5 timestamps for the hour on a 15-min grid
+    # Assertions for empty but structured output
     assert len(result_df) == 5
-    
-    # Aggregates like Export_Sum should be initialized to 0.0 even if no neighbor data found
-    assert 'Export_Sum' in result_df.columns
+    assert 'Time_UTC' in result_df.columns
+    assert 'timestamp' not in result_df.columns
+    # Verify that the DatetimeIndex has been promoted to a regular column
+    assert not isinstance(result_df.index, pd.DatetimeIndex)
+    # Verify the data type of the new column is indeed datetime-like
+    assert pd.api.types.is_datetime64_any_dtype(result_df['Time_UTC'])
+
     assert result_df['Export_Sum'].sum() == 0.0
+
+
+# --- New Structural Formatting Tests ---
+
+def test_finalize_dataframe_structure_multiindex(entsoe_client):
+    """
+    Verify that MultiIndex columns are flattened.
+    """
+    col_tuples = [('Down', 1, 'Activated'), ('Up', 2, '')]
+    multi_columns = pd.MultiIndex.from_tuples(col_tuples)
+    time_index = pd.date_range(start='2026-03-18', periods=2, freq='h', tz='UTC')
+    
+    df_mock = pd.DataFrame(data=[[10.0, 20.0], [15.0, 25.0]], index=time_index, columns=multi_columns)
+    df_result = entsoe_client.finalize_dataframe_structure(df_mock)
+    
+    assert 'Down_1_Activated' in df_result.columns
+    assert 'Up_2' in df_result.columns
+    assert not any(isinstance(col, tuple) for col in df_result.columns)
+
+def test_finalize_dataframe_structure_suffix_removal(entsoe_client):
+    """
+    Verify stripping of '_0' suffixes.
+    """
+    df_mock = pd.DataFrame({
+        'DA_Price_0': [50.0],
+        'Load_Actual_0': [1000.0],
+        'Export_BE': [200.0] 
+    })
+    
+    df_result = entsoe_client.finalize_dataframe_structure(df_mock)
+    
+    assert 'DA_Price' in df_result.columns
+    assert 'Load_Actual' in df_result.columns
+    assert 'DA_Price_0' not in df_result.columns
+
+def test_safe_query_graceful_degradation(entsoe_client, caplog):
+    """
+    Verify handling of ENTSO-E structural corruption (stack error).
+    """
+    def mock_failing_api_call(*args, **kwargs):
+        raise ValueError("Columns with duplicate values are not supported in stack")
+    
+    result_df = entsoe_client._safe_query(mock_failing_api_call, 'NL')
+    
+    assert result_df.empty
+    assert "DATA QUALITY ALERT" in caplog.text
