@@ -4,15 +4,15 @@ Centralizing these values ensures consistency across extraction and processing m
 """
 
 # Core Strategy Defaults
-DEFAULT_COUNTRY = 'NL'
+DEFAULT_COUNTRY = 'BE'
 DEFAULT_FREQ_GRID = '15min'
 
 # Cross-Border Dynamics
-# Fixed neighbors for NL (Removed 'FR', added BE, NO, DK)
-NL_NEIGHBORS = ['BE', 'DE_LU', 'GB', 'NO', 'DK']
+# Fixed neighbors for BE
+BE_NEIGHBORS = ['FR', 'NL', 'DE_LU', 'GB']
 
 # Execution Environments
-DEFAULT_TIMEZONE = 'Europe/Amsterdam'
+DEFAULT_TIMEZONE = 'Europe/Brussels'
 
 # API Resilience Configuration
 MAX_RETRY_ATTEMPTS = 3
