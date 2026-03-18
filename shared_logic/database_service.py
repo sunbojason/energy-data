@@ -49,7 +49,7 @@ class DatabaseService:
     def upsert_energy_data(self, df: pd.DataFrame, table_name: str = "entsoe"):
         """
         Inserts the cleaned DataFrame into the Azure SQL database.
-        Includes safeguards against empty payloads.
+        Includes safeguards against empty payloads and index loss.
         """
         if df is None or df.empty:
             logging.warning("Execution halted: Empty DataFrame provided to DatabaseService.")
@@ -58,14 +58,19 @@ class DatabaseService:
         try:
             logging.info(f"Attempting to insert {len(df)} records into '{table_name}'.")
             
+            # Defensive copy to avoid altering the upstream dataframe
+            df_to_insert = df.copy()
+            
+            # Structural discipline: Ensure the timestamp index is preserved as a column
+            if isinstance(df_to_insert.index, pd.DatetimeIndex):
+                df_to_insert = df_to_insert.reset_index()
+            
             # Using 'append' to push data. 
-            # Note: For strict primary key constraints, you would replace this with a temporary 
-            # table insert followed by a raw SQL MERGE execution.
-            df.to_sql(
+            df_to_insert.to_sql(
                 name=table_name, 
                 con=self.engine, 
                 if_exists='append', 
-                index=False # Set to True if the DataFrame index is your timestamp column
+                index=False 
             )
             
             logging.info("Database transaction completed successfully.")

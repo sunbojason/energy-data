@@ -53,7 +53,7 @@ def test_clean_energy_data_fall_back():
 def test_clean_energy_data_price_step_function():
     """
     Verify that ffill patches intra-hour 15-min gaps (limit=3), 
-    but correctly stops at major gaps to avoid data hallucination.
+    but correctly retains NaN for major gaps to prevent data hallucination.
     """
     raw_data = (
         "timestamp,DA_Price\n"
@@ -69,10 +69,10 @@ def test_clean_energy_data_price_step_function():
     assert df_result.iloc[1]['DA_Price'] == 100.0
     assert df_result.iloc[3]['DA_Price'] == 100.0
     
-    # The hour 01:00 Local is beyond the limit=3, so it should be filled by final_refinement
-    # In the service, this is 0.0 to satisfy SQL NOT NULL constraints.
-    assert df_result.iloc[4]['DA_Price'] == 0.0
-    assert df_result.iloc[7]['DA_Price'] == 0.0
+    # The hour 01:00 Local is beyond the limit=3, so it should retain NaN.
+    # This prevents injecting false 0.0 signals into quantitative models.
+    assert pd.isna(df_result.iloc[4]['DA_Price'])
+    assert pd.isna(df_result.iloc[7]['DA_Price'])
 
 def test_clean_energy_data_continuous_interpolation():
     """

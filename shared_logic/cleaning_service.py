@@ -70,9 +70,9 @@ class CleaningService:
                 )
 
             # 5. FINAL REFINEMENT
-            # Fill remaining small gaps with 0.0 to prevent SQL NULL constraint violations,
-            # especially for flow-based columns that may be zero by default.
-            df = df.fillna(0.0)
+            zero_fill_cols = [col for col in df.columns if col.endswith('_Sum')]
+            if zero_fill_cols:
+                df[zero_fill_cols] = df[zero_fill_cols].fillna(0.0)
 
             # Export back to CSV for downstream Blob Storage or SQL ingestion
             return df.to_csv(index=True)
