@@ -215,7 +215,7 @@ def test_safe_query_graceful_degradation(entsoe_client, caplog):
     def mock_failing_api_call(*args, **kwargs):
         raise ValueError("Columns with duplicate values are not supported in stack")
     
-    result_df = entsoe_client._safe_query(mock_failing_api_call, 'BE')
+    result_df = entsoe_client._safe_query(mock_failing_api_call, 'NL')
     
     assert result_df.empty
     assert "DATA QUALITY ALERT" in caplog.text

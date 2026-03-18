@@ -13,7 +13,7 @@ from shared_logic.constants import (
         DEFAULT_FREQ_GRID,
         DEFAULT_TIMEZONE,
         MAX_RETRY_ATTEMPTS,
-        BE_NEIGHBORS,
+        NL_NEIGHBORS,
         RETRY_WAIT_MAX,
         RETRY_WAIT_MIN,
     )
@@ -122,7 +122,7 @@ class EntsoeDataClient:
         # --- 2. Cross-Border Dynamics ---
         export_cols, import_cols = [], []
 
-        for neighbor in BE_NEIGHBORS:
+        for neighbor in NL_NEIGHBORS:
             export_df = self._safe_query(self.client.query_crossborder_flows, country, neighbor, start=start_time, end=end_time)
             if not export_df.empty:
                 aligned = self._align_and_flatten(export_df, f"Export_{neighbor}")
@@ -173,8 +173,12 @@ class EntsoeDataClient:
             logging.info("Successfully flattened MultiIndex columns.")
 
         # 2. Clean up default suffixes from entsoe-py (e.g., DA_Price_0 -> DA_Price)
-        # We replace it with explicit reassignment, and handle potential trailing spaces.
-        master_df.columns = [re.sub(r'_0\s*$', '', str(col)).strip() for col in master_df.columns]
+        clean_columns = {
+            col: re.sub(r'\s*_0$', '', str(col)) 
+            for col in master_df.columns
+        }
+        
+        master_df.rename(columns=clean_columns, inplace=True)
 
         # 3. Secure the Timestamp Index
         # We use 'Time_UTC' to avoid SQL Server 'timestamp' keyword conflict

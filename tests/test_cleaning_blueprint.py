@@ -8,7 +8,7 @@ from blueprints.cleaning import blob_trigger_cleaning_processor
 def mock_blob_input():
     """Mocks the Azure Functions InputStream."""
     blob = MagicMock(spec=func.InputStream)
-    blob.name = "raw-data/be_market_data_20260315.csv"
+    blob.name = "raw-data/nl_market_data_20260315.csv"
     blob.length = 1024
     return blob
 
@@ -38,7 +38,9 @@ def test_cleaning_processor_success(mock_cleaning_service, mock_blob_input, mock
     # Assertions
     mock_cleaning_service.clean_energy_data.assert_called_once_with(raw_content)
     mock_blob_output.set.assert_called_once_with(cleaned_content)
-    assert "be_market_data_20260315.csv" in caplog.text
+    assert "CLEANING SUCCESS" in caplog.text
+    assert "nl_market_data_20260315.csv" in caplog.text
+
 @patch("blueprints.cleaning.CleaningService")
 def test_cleaning_processor_empty_input(mock_cleaning_service, mock_blob_input, mock_blob_output, caplog):
     """
