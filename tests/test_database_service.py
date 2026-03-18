@@ -66,14 +66,13 @@ def test_upsert_success(mock_to_sql, mock_env, sample_energy_df):
     
     # Execute the method
     service.upsert_energy_data(sample_energy_df, table_name="test_table")
-    
-    # Verify pandas to_sql was called with the correct table name and engine
-    mock_to_sql.assert_called_once_with(
-        name="test_table",
-        con=service.engine,
-        if_exists='append',
-        index=False
-    )
+
+    # Verify pandas to_sql was called with the correct table name, engine, and dtype mapping
+    args, kwargs = mock_to_sql.call_args
+    assert kwargs["name"] == "test_table"
+    assert kwargs["if_exists"] == "append"
+    assert kwargs["index"] is False
+    assert "Time_UTC" in kwargs["dtype"]
 
 @patch("pandas.DataFrame.to_sql")
 def test_upsert_exception_handling(mock_to_sql, mock_env, sample_energy_df, caplog):

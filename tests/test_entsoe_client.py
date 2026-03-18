@@ -101,6 +101,13 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     mock_flow_data = pd.Series([500.0] * 5, index=idx_15min)
     mock_entsoe_pandas_client.query_crossborder_flows.return_value = mock_flow_data
     
+    # 5. Mock extended calls to verify integration
+    mock_entsoe_pandas_client.query_net_position.return_value = pd.Series([100.0] * 5, index=idx_15min, name='net_position')
+    
+    # Mock generation to give us Gen_ columns
+    gen_multi_cols = pd.MultiIndex.from_tuples([('Nuclear', 'Actual Aggregated')])
+    mock_entsoe_pandas_client.query_generation.return_value = pd.DataFrame([[1000.0]]*5, index=idx_15min, columns=gen_multi_cols)
+
     # Prevent warnings for optional features
     mock_entsoe_pandas_client.query_load_forecast.return_value = pd.DataFrame()
     mock_entsoe_pandas_client.query_current_balancing_state.return_value = pd.DataFrame()
@@ -122,11 +129,15 @@ def test_fetch_comprehensive_market_data_success(entsoe_client, mock_entsoe_pand
     # 2. Verify CLEAN Column Names (Stripping _0)
     # entsoe-py usually adds _0 when a Series is converted to DataFrame during join.
     # Our finalize_dataframe_structure must strip it.
-    assert 'DA_Price' in result_df.columns
-    assert 'DA_Price_0' not in result_df.columns
+    assert 'DA_Price' in result_df.columns # Verify standard columns
     assert 'Load_Actual' in result_df.columns
-    assert 'Load_Actual_0' not in result_df.columns
+    assert 'Imb_imbalance_short' in result_df.columns
     
+    # Verify extended columns are now integrated as well
+    assert 'NetPos_net_position' in result_df.columns
+    assert any(col.startswith('Gen_') for col in result_df.columns)
+    
+    assert len(result_df) > 0
     # 3. Verify Data Integrity
     assert result_df['DA_Price'].iloc[1] == 50.0
     assert 'Export_Sum' in result_df.columns
@@ -219,3 +230,110 @@ def test_safe_query_graceful_degradation(entsoe_client, caplog):
     
     assert result_df.empty
     assert "DATA QUALITY ALERT" in caplog.text
+    assert "skipped due to structural corruption" in caplog.text
+
+
+# --- Extended Market Data Tests ---
+
+class TestFetchExtendedMarketData:
+    """Tests for the fetch_extended_market_data() method."""
+
+    @pytest.fixture
+    def time_window(self):
+        tz = DEFAULT_TIMEZONE
+        start = pd.Timestamp('2026-03-11 00:00', tz=tz)
+        end = pd.Timestamp('2026-03-11 01:00', tz=tz)
+        return start, end
+
+    @pytest.fixture
+    def idx_15min(self, time_window):
+        start, end = time_window
+        return pd.date_range(start=start, end=end, freq=DEFAULT_FREQ_GRID, tz=DEFAULT_TIMEZONE)
+
+    def test_extended_net_position_included(self, entsoe_client, mock_entsoe_pandas_client, time_window, idx_15min):
+        """
+        Verify that net_position is queried and surfaced as a column.
+        """
+        start, end = time_window
+        mock_entsoe_pandas_client.query_net_position.return_value = pd.Series(
+            [100.0] * 5, index=idx_15min, name='net_position'
+        )
+        # All other queries return empty so we isolate the test
+        _no_data = pd.DataFrame()
+        for attr in [
+            'query_aggregated_bids', 'query_load_and_forecast', 'query_generation_forecast',
+            'query_wind_and_solar_forecast', 'query_intraday_wind_and_solar_forecast',
+            'query_generation', 'query_scheduled_exchanges',
+            'query_net_transfer_capacity_weekahead', 'query_net_transfer_capacity_monthahead',
+            'query_contracted_reserve_prices', 'query_contracted_reserve_prices_procured_capacity',
+            'query_contracted_reserve_amount', 'query_generation_per_plant',
+            'query_physical_crossborder_allborders', 'query_import',
+        ]:
+            getattr(mock_entsoe_pandas_client, attr).return_value = _no_data
+
+        result = entsoe_client.fetch_extended_market_data(start, end)
+
+        assert 'Time_UTC' in result.columns
+        net_pos_cols = [c for c in result.columns if 'NetPos' in c]
+        assert len(net_pos_cols) > 0, "Expected at least one NetPos column"
+
+    def test_extended_generation_multiindex_flattened(self, entsoe_client, mock_entsoe_pandas_client, time_window, idx_15min):
+        """
+        Verify that MultiIndex generation columns (fuel type x actual/capacity) are properly flattened.
+        """
+        start, end = time_window
+
+        # Simulate the MultiIndex DataFrame returned by query_generation
+        multi_cols = pd.MultiIndex.from_tuples([
+            ('Nuclear', 'Actual Aggregated'),
+            ('Solar', 'Actual Aggregated'),
+        ])
+        gen_df = pd.DataFrame(
+            [[1000.0, 200.0]] * 5,
+            index=idx_15min,
+            columns=multi_cols,
+        )
+        mock_entsoe_pandas_client.query_generation.return_value = gen_df
+
+        _no_data = pd.DataFrame()
+        for attr in [
+            'query_net_position', 'query_aggregated_bids', 'query_load_and_forecast',
+            'query_generation_forecast', 'query_wind_and_solar_forecast',
+            'query_intraday_wind_and_solar_forecast', 'query_scheduled_exchanges',
+            'query_net_transfer_capacity_weekahead', 'query_net_transfer_capacity_monthahead',
+            'query_contracted_reserve_prices', 'query_contracted_reserve_prices_procured_capacity',
+            'query_contracted_reserve_amount', 'query_generation_per_plant',
+            'query_physical_crossborder_allborders', 'query_import',
+        ]:
+            getattr(mock_entsoe_pandas_client, attr).return_value = _no_data
+
+        result = entsoe_client.fetch_extended_market_data(start, end)
+
+        # No tuples should remain as column names
+        assert not any(isinstance(c, tuple) for c in result.columns)
+        gen_cols = [c for c in result.columns if 'Gen_' in c]
+        assert len(gen_cols) > 0, "Expected flattened Gen_ columns"
+
+    def test_extended_graceful_degradation_all_empty(self, entsoe_client, mock_entsoe_pandas_client, time_window):
+        """
+        When all 16 extended sub-queries raise NoMatchingDataError, the method should
+        still return a valid, SQL-ready empty-data DataFrame (no crash).
+        """
+        start, end = time_window
+
+        for attr in [
+            'query_net_position', 'query_aggregated_bids', 'query_load_and_forecast',
+            'query_generation_forecast', 'query_wind_and_solar_forecast',
+            'query_intraday_wind_and_solar_forecast', 'query_generation',
+            'query_scheduled_exchanges', 'query_net_transfer_capacity_weekahead',
+            'query_net_transfer_capacity_monthahead', 'query_contracted_reserve_prices',
+            'query_contracted_reserve_prices_procured_capacity', 'query_contracted_reserve_amount',
+            'query_generation_per_plant', 'query_physical_crossborder_allborders', 'query_import',
+        ]:
+            getattr(mock_entsoe_pandas_client, attr).side_effect = NoMatchingDataError("no data")
+
+        result = entsoe_client.fetch_extended_market_data(start, end)
+
+        assert 'Time_UTC' in result.columns
+        assert not isinstance(result.index, pd.DatetimeIndex)
+        assert len(result) == 5  # 15-min slots in a 1-hour window

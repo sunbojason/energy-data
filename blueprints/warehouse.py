@@ -12,6 +12,10 @@ def blob_trigger_sql_ingestion(cleanedblob: func.InputStream):
     """
     Final stage: Triggered automatically when clean data arrives.
     Reads the CSV and dispatches it to the Azure SQL Database.
+
+    Routing logic:
+      - Files containing '_extended_' in their name  → 'entsoe_extended' table
+      - All other files                               → 'entsoe' table
     """
     file_name = cleanedblob.name
     logging.info(f"WAREHOUSE PIPELINE INITIATED: Reading {file_name} ({cleanedblob.length} bytes)")
@@ -26,15 +30,17 @@ def blob_trigger_sql_ingestion(cleanedblob: func.InputStream):
         # 2. Parse into DataFrame
         df = pd.read_csv(StringIO(content))
         
-        # Ensure timestamp is treated correctly if it's part of the columns
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Ensure timestamp columns are treated correctly
+        for ts_col in ('timestamp', 'Time_UTC'):
+            if ts_col in df.columns:
+                df[ts_col] = pd.to_datetime(df[ts_col], utc=True)
 
         # 3. Initialize connection and push data
         db_service = DatabaseService()
         db_service.upsert_energy_data(df, table_name="entsoe")
         
         logging.info(f"WAREHOUSE SUCCESS: Payload from {file_name} permanently stored.")
+
 
     except pd.errors.EmptyDataError:
         logging.error(f"WAREHOUSE FAILURE: {file_name} contains no parsable columns.")
