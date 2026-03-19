@@ -40,8 +40,7 @@ def test_timer_trigger_ingestion_success(mock_entsoe_client_class, mock_global_b
     # UPDATED: Verify the new keyword arguments are passed correctly
     mock_client_instance.fetch_comprehensive_market_data.assert_called_once_with(
         start_time=ANY,
-        end_time=ANY,
-        target_country=DEFAULT_COUNTRY
+        end_time=ANY
     )
     
     mock_global_blob_service.get_blob_client.assert_called_once_with(

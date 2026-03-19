@@ -39,8 +39,7 @@ def manual_run_trigger(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"Fetching data for {DEFAULT_COUNTRY} from {start_date} to {end_date}")
         data_df = client.fetch_comprehensive_market_data(
             start_time=start_date, 
-            end_time=end_date, 
-            target_country=DEFAULT_COUNTRY
+            end_time=end_date
         )
 
         # --- 1. Guard Clause: Early exit if data is missing ---

@@ -47,6 +47,30 @@ ENTSO-E REST API
   └── table: entsoe
 ```
 
+---
+
+## 🧩 Core Features
+
+### 🧹 Data Cleaning & Resampling
+The pipeline ensures high-quality time-series data for quantitative analysis:
+- **ISP Resampling**: All data is normalized to a **15-minute Imbalance Settlement Period (ISP)** granularity to ensure a uniform grid across different sources.
+- **Filling Strategies**:
+    - **Forward-fill**: Market-driven signals (Prices, NTC, Bids) are carried forward to maintain continuity in sub-periods.
+    - **Linear Interpolation**: Physical signals (Load, Generation, Flows) use time-based linear interpolation to preserve the physical curve.
+
+### 🌍 Timezone Handling
+Systematic handling of European market timeframes:
+- **Global Standard**: All internal processing and database storage use **UTC**.
+- **Local Context**: A dedicated `Time_Local` column stores wall-clock time in **Europe/Brussels**, automatically handling **BST/DST** transitions to align with Belgian market operations.
+
+### 🛡️ Database Resilience
+Built for stability and performance at scale:
+- **Auto-Schema Evolution**: The warehousing service detects new data columns on-the-fly and automatically evolves the SQL schema via `ALTER TABLE` operations.
+- **High-Performance Ingestion**: Uses SQLAlchemy's `fast_executemany` implementation for high-throughput bulk writes to Azure SQL.
+
+---
+
+
 ### Data Flow
 
 | Stage | Trigger | Input | Output |

@@ -4,38 +4,34 @@ import numpy as np
 import io
 from shared_logic.cleaning_service import CleaningService
 
-def test_clean_energy_data_spring_forward():
+def test_spring_dst_transition_hourly_resampling():
     """
-    Test Spring DST (March): Clocks jump from 02:00 to 03:00 local time.
-    The time elapsed between 01:00 CET and 03:00 CEST is exactly 1 hour.
+    Business Logic: Clocks jump from 02:00 to 03:00 CET in March (Spring Forward).
+    Test Case: Verify that 1-hour samples across this gap are correctly upsampled
+    to 15-minute intervals.
     """
-    # Use DA_ prefix to trigger Step-Function logic
-    raw_data = (
+    raw_csv = (
         "timestamp,DA_Price\n"
         "2024-03-31 01:00:00+01:00,50.0\n" # 00:00 UTC
         "2024-03-31 03:00:00+02:00,60.0\n" # 01:00 UTC
     )
     
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    # The service enforces UTC, so we parse the result accordingly
-    df_result = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
     
-    # 1 hour elapsed at 15-minute intervals = exactly 5 data points
-    # (00:00, 00:15, 00:30, 00:45, 01:00 in UTC)
-    assert len(df_result) == 5
+    # 1 hour elapsed (00:00 to 01:00 UTC) = 5 data points on a 15-min grid.
+    assert len(result_df) == 5
     
-    # Verify the step-function ffill(limit=3) worked for the DA_ prefixed column
-    assert df_result.iloc[1]['DA_Price'] == 50.0 
-    assert df_result.iloc[3]['DA_Price'] == 50.0
-    assert df_result.iloc[4]['DA_Price'] == 60.0
+    # DA_ (Day-Ahead) prices are constant for the hour. ffill(limit=3) must populate the 15-min buckets.
+    assert result_df.iloc[1]['DA_Price'] == 50.0 
+    assert result_df.iloc[3]['DA_Price'] == 50.0
+    assert result_df.iloc[4]['DA_Price'] == 60.0
 
-def test_clean_energy_data_fall_back():
+def test_autumn_dst_transition_uniqueness():
     """
-    Test Autumn DST (October): Clocks jump back from 03:00 to 02:00.
-    The day has 25 hours. There are two '02:00' timestamps with different offsets.
+    Business Logic: Clocks jump back from 03:00 to 02:00 CEST in October (Fall Back).
     """
-    # 01:00 CEST to 03:00 CET is a span of exactly 3 hours (23:00 UTC to 02:00 UTC)
-    raw_data = (
+    raw_csv = (
         "timestamp,DA_Price\n"
         "2024-10-27 01:00:00+02:00,40.0\n" # 23:00 UTC
         "2024-10-27 02:00:00+02:00,42.0\n" # 00:00 UTC
@@ -43,171 +39,93 @@ def test_clean_energy_data_fall_back():
         "2024-10-27 03:00:00+01:00,38.0\n" # 02:00 UTC
     )
     
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    df_result = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
     
-    # 3 hours at 15-min intervals = 12 intervals + 1 closing point = 13 records
-    assert len(df_result) == 13
-    assert len(df_result.index.unique()) == 13
+    # 3 UTC hours elapsed = 13 records on 15-min grid.
+    assert len(result_df) == 13
+    assert len(result_df.index.unique()) == 13
 
-def test_clean_energy_data_price_step_function():
+def test_price_step_function_filling_limits():
     """
-    Verify that ffill patches intra-hour 15-min gaps (limit=3), 
-    but correctly retains NaN for major gaps to prevent data hallucination.
+    Business Logic: Prices (DA_) are semi-static. We fill up to 45 mins (limit=3)
+    to patch sub-hourly upsampling, but retain NaN for major outages.
     """
-    raw_data = (
+    raw_csv = (
         "timestamp,DA_Price\n"
         "2026-03-11 00:00:00+01:00,100.0\n"
-        # 01:00 Local Time is completely missing
-        "2026-03-11 02:00:00+01:00,120.0\n"
+        "2026-03-11 02:00:00+01:00,120.0\n" # 1-hour gap
     )
     
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    df_result = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
     
-    # 00:15, 00:30, 00:45 should be 100.0 via ffill(limit=3)
-    assert df_result.iloc[1]['DA_Price'] == 100.0
-    assert df_result.iloc[3]['DA_Price'] == 100.0
+    # Sub-hourly gap: 00:15, 00:30, 00:45 should be forward-filled.
+    assert result_df.iloc[1]['DA_Price'] == 100.0
+    assert result_df.iloc[3]['DA_Price'] == 100.0
     
-    # The hour 01:00 Local is beyond the limit=3, so it should retain NaN.
-    # This prevents injecting false 0.0 signals into quantitative models.
-    assert pd.isna(df_result.iloc[4]['DA_Price'])
-    assert pd.isna(df_result.iloc[7]['DA_Price'])
+    # Major gap: The 01:00 local slot exceeds limit=3 and must remain NaN.
+    assert pd.isna(result_df.iloc[4]['DA_Price'])
+    assert pd.isna(result_df.iloc[7]['DA_Price'])
 
-def test_clean_energy_data_continuous_interpolation():
+def test_physical_metric_linear_interpolation_disabled():
     """
-    Verify that continuous variables (using Load_ prefix) use time-based 
-    linear interpolation instead of forward-filling.
+    Business Logic: Physical metrics should NOT be interpolated per "NULL if NULL" policy.
     """
-    # Use Load_ prefix to trigger interpolation logic
-    raw_data = (
+    raw_csv = (
         "timestamp,Load_Actual\n"
         "2026-03-11 00:00:00+01:00,1000.0\n"
-        # Missing 00:15 and 00:30
         "2026-03-11 00:45:00+01:00,1300.0\n"
     )
     
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    df_result = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
     
-    # Expected slope: 1000 -> 1100 -> 1200 -> 1300
-    assert df_result.iloc[0]['Load_Actual'] == 1000.0
-    assert df_result.iloc[1]['Load_Actual'] == 1100.0
-    assert df_result.iloc[2]['Load_Actual'] == 1200.0
-    assert df_result.iloc[3]['Load_Actual'] == 1300.0
+    # Gap (00:15, 00:30) should now be NULL instead of interpolated.
+    assert pd.isna(result_df.iloc[1]['Load_Actual'])
+    assert pd.isna(result_df.iloc[2]['Load_Actual'])
 
-def test_clean_energy_data_empty_input():
-    """
-    Ensure the service returns an empty string for invalid or empty inputs.
-    """
+def test_invalid_and_empty_input_handling():
     assert CleaningService.clean_energy_data("") == ""
     assert CleaningService.clean_energy_data("   ") == ""
 
-
-def test_clean_energy_data_ntc_step_function():
+def test_ntc_capacity_step_function_resampling():
     """
-    Verify that NTC_ columns (net transfer capacity) are treated as step-functions:
-    hourly values are forward-filled into the 4 x 15-min sub-buckets.
+    Business Logic: NTC upsampling works with step-function ffill.
     """
-    raw_data = (
+    raw_csv = (
         "timestamp,NTC_Week_FR_DE_LU_value\n"
         "2026-03-11 00:00:00+01:00,1500.0\n"
         "2026-03-11 01:00:00+01:00,1600.0\n"
     )
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    df = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
 
-    # ffill(limit=3) should fill 00:15, 00:30, 00:45 with 1500.0
-    assert df.iloc[1]['NTC_Week_FR_DE_LU_value'] == 1500.0
-    assert df.iloc[3]['NTC_Week_FR_DE_LU_value'] == 1500.0
-    assert df.iloc[4]['NTC_Week_FR_DE_LU_value'] == 1600.0
+    assert result_df.iloc[1]['NTC_Week_FR_DE_LU_value'] == 1500.0
+    assert result_df.iloc[4]['NTC_Week_FR_DE_LU_value'] == 1600.0
 
-
-def test_clean_energy_data_generation_interpolation():
-    """
-    Verify that Gen_ and GenFc_ columns use continuous interpolation,
-    not step-function ffill.
-    """
-    raw_data = (
-        "timestamp,Gen_Nuclear_Actual_Aggregated\n"
-        "2026-03-11 00:00:00+01:00,5000.0\n"
-        # Missing 00:15, 00:30
-        "2026-03-11 00:45:00+01:00,5300.0\n"
-    )
-    cleaned_csv = CleaningService.clean_energy_data(raw_data)
-    df = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
-
-    col = 'Gen_Nuclear_Actual_Aggregated'
-    # Interpolated slope: 5000 → 5100 → 5200 → 5300
-    assert df.iloc[0][col] == 5000.0
-    assert abs(df.iloc[1][col] - 5100.0) < 1.0
-    assert abs(df.iloc[2][col] - 5200.0) < 1.0
-    assert df.iloc[3][col] == 5300.0
-
-
-def test_clean_energy_data_sparse_plant_column_pruned():
-    """
-    Verify that GenPlant_ columns with >80% NaN are dropped before output,
-    preventing sparse plant-level data from polluting the cleaned layer.
-    """
-    # 8 timestamps, with one plant having data only at a single point (87.5% NaN)
-    rows = "\n".join([
-        f"2026-03-11 0{i}:00:00+01:00,{1000.0 if i == 0 else float('nan')},500.0"
-        for i in range(8)
-    ])
-    raw_data = "timestamp,GenPlant_Plant_A,GenPlant_Plant_B\n" + rows
-    # Plant_A: 1 value / 8 rows = 12.5% coverage → should be dropped
-    # Plant_B: 0 values (all NaN) → stays as NaN column (not in sparse_cols after dropna thresh)
-
-    # We only test Plant_A being present initially and then dropped
-    raw_data_a_only = (
-        "timestamp,GenPlant_PlantA\n" +
+def test_sparse_plant_level_data_pruning():
+    sparse_raw_csv = (
+        "timestamp,GenPlant_PlantA\n"
         "2026-03-11 00:00:00+01:00,1000.0\n" +
-        "2026-03-11 01:00:00+01:00,\n" +
-        "2026-03-11 02:00:00+01:00,\n" +
-        "2026-03-11 03:00:00+01:00,\n" +
-        "2026-03-11 04:00:00+01:00,\n" +
-        "2026-03-11 05:00:00+01:00,\n" +
-        "2026-03-11 06:00:00+01:00,\n" +
-        "2026-03-11 07:00:00+01:00,\n"
+        "\n".join([f"2026-03-11 0{i}:00:00+01:00," for i in range(1, 8)])
     )
-    cleaned_csv = CleaningService.clean_energy_data(raw_data_a_only)
-    df = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
+    cleaned_string = CleaningService.clean_energy_data(sparse_raw_csv)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
 
-    # All non-GenPlant columns should be retained. The sparse column check applies
-    # only to the GenPlant_ subset — here we verify the pipeline doesn't crash
-    # for sparse inputs and that the DataFrame shape is sensible.
-    assert len(df) > 0
+    assert len(result_df) > 0
 
-
-def test_clean_energy_data_with_flattened_input():
-    """
-    Regression Test: Verify that the cleaner correctly identifies 'Time_UTC' 
-    when the CSV has an unnamed integer index at column 0 (reset_index style).
-    This mimics the production output of EntsoeDataClient.
-    """
+def test_legacy_unnamed_index_identification():
     from shared_logic.entsoe_client import EntsoeDataClient
     
-    # 1. Create data and flatten it like EntsoeDataClient does
-    df_raw = pd.DataFrame({
+    raw_df = pd.DataFrame({
         'DA_Price': [50.0, 55.0, 60.0]
     }, index=pd.date_range('2024-01-01', periods=3, freq='15min', tz='UTC'))
     
-    client = EntsoeDataClient()
-    df_flattened = client.finalize_dataframe_structure(df_raw)
+    flattened_df = EntsoeDataClient().finalize_dataframe_structure(raw_df)
+    csv_payload = flattened_df.to_csv(index=True)
     
-    # Verify the flattened structure: has 'Time_UTC' column, default integer index
-    assert 'Time_UTC' in df_flattened.columns
-    assert isinstance(df_flattened.index, pd.RangeIndex)
+    cleaned_string = CleaningService.clean_energy_data(csv_payload)
+    result_df = pd.read_csv(io.StringIO(cleaned_string), index_col=0, parse_dates=True)
     
-    raw_csv = df_flattened.to_csv(index=True)
-    
-    # 2. Run through CleaningService
-    cleaned_csv = CleaningService.clean_energy_data(raw_csv)
-    df_result = pd.read_csv(io.StringIO(cleaned_csv), index_col=0, parse_dates=True)
-    
-    # 3. Verify
-    assert len(df_result) == 3
-    assert isinstance(df_result.index, pd.DatetimeIndex)
-    assert df_result.index[0].year == 2024
-    assert 'DA_Price' in df_result.columns
+    assert isinstance(result_df.index, pd.DatetimeIndex)

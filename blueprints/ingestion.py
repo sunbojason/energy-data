@@ -39,7 +39,7 @@ def timer_trigger_entsoe_ingestion(myTimer: func.TimerRequest) -> None:
         # fetch_comprehensive_market_data now internally calls fetch_extended_market_data
         # and merges them into one single master DataFrame.
         data_df = client.fetch_comprehensive_market_data(
-            start_time=start_date, end_time=end_date, target_country=DEFAULT_COUNTRY
+            start_time=start_date, end_time=end_date
         )
 
         if data_df is None or data_df.empty:

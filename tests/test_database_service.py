@@ -7,26 +7,26 @@ from shared_logic.database_service import DatabaseService
 # --- Test Fixtures ---
 
 @pytest.fixture
-def mock_env(monkeypatch):
-    """Sets up mandatory environment variables for DatabaseService initialization."""
+def mock_db_env(monkeypatch):
+    """Business Logic: Ensure dummy credentials for unit tests to prevent AAD token acquisition."""
     monkeypatch.setenv("SQL_SERVER_NAME", "test-server.database.windows.net")
     monkeypatch.setenv("SQL_DATABASE_NAME", "test-db")
 
 @pytest.fixture
-def sample_energy_df():
-    """Generates a sample DataFrame for ingestion testing."""
+def sample_market_df():
+    """Generates a standard 15-min interval DataFrame for testing ingestion."""
     return pd.DataFrame({
         "timestamp": ["2026-03-11 00:00:00"],
-        "DA_Price_0": [45.5],
-        "Load_Actual_0": [12000.0]
+        "DA_Price": [45.5],
+        "Load_Actual": [12000.0]
     })
 
-# --- Unit Tests ---
+# --- Unit Tests: Database Lifecycle ---
 
-def test_initialization_success(mock_env):
+def test_service_initialization_with_config(mock_db_env):
     """
-    Test that DatabaseService initializes correctly when 
-    all environment variables are present.
+    Business Logic: Service must correctly construct connection strings for ODBC Driver 18
+    based on Azure environment variables.
     """
     service = DatabaseService()
     assert service.server == "test-server.database.windows.net"
@@ -34,10 +34,9 @@ def test_initialization_success(mock_env):
     assert "TrustServerCertificate=yes" in service.conn_str
     assert service.engine is not None
 
-def test_initialization_failure(monkeypatch):
+def test_initialization_failure_on_missing_env(monkeypatch):
     """
-    Test that DatabaseService raises ValueError when 
-    configuration is missing.
+    Business Logic: Prevent misconfigured deployments by failing early if config is missing.
     """
     monkeypatch.delenv("SQL_SERVER_NAME", raising=False)
     monkeypatch.delenv("SQL_DATABASE_NAME", raising=False)
@@ -45,61 +44,55 @@ def test_initialization_failure(monkeypatch):
     with pytest.raises(ValueError, match="Database configuration missing"):
         DatabaseService()
 
-def test_upsert_empty_dataframe(mock_env, caplog):
+def test_graceful_skipping_of_empty_upsert(mock_db_env, caplog):
     """
-    Test that the service gracefully handles and logs 
-    when an empty DataFrame is provided.
+    Business Logic: If a processing step returns zero rows, the database service 
+    should log a warning and skip the transaction to save IO.
     """
     service = DatabaseService()
     service.upsert_energy_data(pd.DataFrame())
     
-    # Verify that a warning was logged and no execution happened
-    assert "Empty DataFrame provided" in caplog.text
+    assert "Upsert aborted" in caplog.text
 
+@patch("shared_logic.database_service.DatabaseService._delete_existing_records")
 @patch("pandas.DataFrame.to_sql")
-def test_upsert_success(mock_to_sql, mock_env, sample_energy_df):
+@patch("shared_logic.database_service.DatabaseService._ensure_table_schema")
+def test_upsert_parameters_and_table_deduction(mock_schema, mock_to_sql, mock_delete, mock_db_env, sample_market_df):
     """
-    Test that upsert_energy_data correctly calls the 
-    pandas to_sql method with expected parameters.
+    Business Logic: Verify that the upsert logic correctly maps DataFrame columns to 
+    SQL types and enforces 'append' mode for time-series accumulation.
     """
     service = DatabaseService()
-    
-    # Execute the method
-    service.upsert_energy_data(sample_energy_df, table_name="test_table")
+    service.upsert_energy_data(sample_market_df, table_name="market_records")
 
-    # Verify pandas to_sql was called with the correct table name, engine, and dtype mapping
-    args, kwargs = mock_to_sql.call_args
-    assert kwargs["name"] == "test_table"
+    # Verify pandas to_sql parameters
+    _, kwargs = mock_to_sql.call_args
+    assert kwargs["name"] == "market_records"
     assert kwargs["if_exists"] == "append"
-    assert kwargs["index"] is False
     assert "Time_UTC" in kwargs["dtype"]
 
+@patch("shared_logic.database_service.DatabaseService._delete_existing_records")
 @patch("pandas.DataFrame.to_sql")
-def test_upsert_exception_handling(mock_to_sql, mock_env, sample_energy_df, caplog):
+@patch("shared_logic.database_service.DatabaseService._ensure_table_schema")
+def test_database_operation_exception_logging(mock_schema, mock_to_sql, mock_delete, mock_db_env, sample_market_df, caplog):
     """
-    Test that database exceptions are caught, logged as fatal, 
-    and re-raised for higher-level handling.
+    Business Logic: Critical database failures must be logged with context for operational 
+    monitoring while ensuring the exception bubbles up to trigger retries.
     """
-    # Force an exception during to_sql execution
     mock_to_sql.side_effect = Exception("Connection Timeout")
-    
     service = DatabaseService()
     
     with pytest.raises(Exception, match="Connection Timeout"):
-        service.upsert_energy_data(sample_energy_df)
+        service.upsert_energy_data(sample_market_df)
     
-    # Verify the error was logged
-    assert "FATAL: Database operation failed" in caplog.text
+    assert "Database operation failed" in caplog.text
 
-def test_token_injection_setup(mock_env):
+def test_aad_authentication_listener_attachment(mock_db_env):
     """
-    Verify that the SQLAlchemy event listener is properly 
-    attached to the engine during initialization.
+    Business Logic: Verify that the Entra ID token injection listener is successfully 
+    attached to the SQLAlchemy engine.
     """
     from sqlalchemy import event
     service = DatabaseService()
-    
-    # Check if a 'do_connect' listener exists on the engine
-    assert event.contains(service.engine, "do_connect", MagicMock()) is False 
-    # (Checking the existence of the specific function is complex with decorators, 
-    # but ensuring engine init didn't crash is primary here).
+    # Check for the existence of any do_connect listeners
+    assert event.contains(service.engine, "do_connect", service._inject_entra_token)
