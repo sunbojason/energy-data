@@ -6,7 +6,7 @@ from typing import List, Dict
 from entsoe.entsoe import EntsoePandasClient
 from entsoe.exceptions import NoMatchingDataError
 from requests.exceptions import RequestException
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from shared_logic.constants import (
     DEFAULT_COUNTRY,
@@ -14,79 +14,79 @@ from shared_logic.constants import (
     DEFAULT_TIMEZONE,
     MAX_RETRY_ATTEMPTS,
     BE_NEIGHBORS,
-    RETRY_WAIT_MAX,
-    RETRY_WAIT_MIN,
     DEFAULT_FLOW_FROM,
     DEFAULT_FLOW_TO,
     DEFAULT_PROCESS_TYPE,
-    DEFAULT_MARKET_AGREEMENT_TYPE,
+    DEFAULT_MARKET_AGREEMENT_TYPE
 )
 
+logger = logging.getLogger(__name__)
+
 class EntsoeAPIError(Exception):
-    """
-    Custom exception raised when the ENTSO-E API fails to return data.
-    """
+    """Custom exception for ENTSO-E API failures."""
     pass
 
 class EntsoeDataClient:
-    def __init__(self):
-        self._initialize_client()
+    """
+    Client for interacting with the ENTSO-E API with active column sanitization.
+    """
+
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or os.getenv("ENTSOE_API_KEY")
+        if not self.api_key:
+            raise ValueError("ENTSOE_API_KEY environment variable is missing.")
+        
+        self.client = EntsoePandasClient(api_key=self.api_key)
         self.default_country = DEFAULT_COUNTRY
         self.freq_grid = DEFAULT_FREQ_GRID
 
-    def _initialize_client(self):
+    @retry(stop=stop_after_attempt(MAX_RETRY_ATTEMPTS), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def _safe_query(self, query_func, *args, **kwargs):
         try:
-            api_key = os.environ['ENTSOE_API_KEY']
-            self.client = EntsoePandasClient(api_key=api_key)
-        except KeyError:
-            raise ValueError("ENTSOE_API_KEY environment variable is missing.")
-
-    @retry(stop=stop_after_attempt(MAX_RETRY_ATTEMPTS), wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX), reraise=True)
-    def _safe_query(self, query_method, *args, **kwargs) -> pd.DataFrame:
-        method_name = getattr(query_method, "__name__", str(query_method))
-        try:
-            raw_data = query_method(*args, **kwargs)
-            return self._standardize_raw_response(raw_data, method_name)
+            return query_func(*args, **kwargs)
         except NoMatchingDataError:
             return pd.DataFrame()
         except RequestException as e:
-            raise EntsoeAPIError(f"Network failure during {method_name}: {str(e)}") from e
+            q_name = getattr(query_func, '__name__', 'API_Query')
+            logger.error(f"Network error in {q_name}: {e}")
+            raise
         except Exception as e:
-            self._handle_structural_errors(e, method_name)
-            return pd.DataFrame()
+            if "duplicate values are not supported in stack" in str(e).lower():
+                logger.warning(f"Structural corruption in response: {e}")
+                return pd.DataFrame()
+            raise
 
-    def _standardize_raw_response(self, raw_data, method_name: str) -> pd.DataFrame:
+    def _align_and_flatten(self, raw_data, prefix: str) -> pd.DataFrame:
+        """
+        Aligns raw data with aggressive column suffix cleaning before it enters the master dataframe.
+        """
         if raw_data is None or (isinstance(raw_data, (pd.DataFrame, pd.Series)) and raw_data.empty):
             return pd.DataFrame()
-        
-        df = raw_data.to_frame() if isinstance(raw_data, pd.Series) else raw_data.copy()
-        
-        # Flatten MultiIndex columns immediately if present to avoid 'stack' errors
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
-            
-        # De-duplicate index and columns
-        df = df[~df.index.duplicated(keep='last')]
-        df = df.loc[:, ~df.columns.duplicated(keep='last')]
-        
-        return df
 
-    def _handle_structural_errors(self, error: Exception, method_name: str):
-        error_msg = str(error)
-        if any(keyword in error_msg for keyword in ["stack", "duplicate values"]):
-            logging.warning(f"Structural corruption in {method_name}: {error_msg}")
+        if isinstance(raw_data, pd.Series):
+            df = raw_data.to_frame(name=prefix)
         else:
-            logging.warning(f"Error in {method_name}: {error}")
+            df = raw_data.copy()
 
-    def _align_and_flatten(self, df: pd.DataFrame, prefix: str) -> pd.DataFrame:
-        if df.empty:
-            return pd.DataFrame()
+        # Phase 1: Clean internal redundant labels
+        if not isinstance(df.columns, pd.MultiIndex):
+            df = df.rename(columns=lambda x: str(x).replace('Actual Load', 'Actual').replace('Actual Generation', 'Actual'))
 
+        # Phase 2: Prefixing
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [f"{prefix}_{'_'.join(map(str, col)).strip()}" for col in df.columns.values]
+            df.columns = [f"{prefix}_{'_'.join(filter(None, map(str, col))).strip()}" for col in df.columns.values]
         else:
             df = self._handle_legacy_imbalance_names(df)
-            df.columns = [f"{prefix}_{str(col).replace(' ', '_')}" for col in df.columns]
+            df.columns = [f"{prefix}_{str(col).replace(' ', '_')}" if str(col) != prefix and prefix not in str(col) else str(col) for col in df.columns]
+
+        # Phase 3: Aggressive removal of numeric iteration suffixes like _0, _1
+        df.columns = [re.sub(r'_\d+\s*$', '', str(col)).strip() for col in df.columns]
+        
+        # Phase 4: Consolidate repeated prefixes like DA_Price_DA_Price
+        df.columns = [col.replace(f"{prefix}_{prefix}", prefix) for col in df.columns]
+        
+        # De-duplicate locally to prevent joining multi-columns with same name
+        df = df.loc[:, ~df.columns.duplicated()]
 
         return df.resample(self.freq_grid).asfreq()
 
@@ -100,81 +100,83 @@ class EntsoeDataClient:
 
     def fetch_comprehensive_market_data(self, start_time: pd.Timestamp, end_time: pd.Timestamp) -> pd.DataFrame:
         logging.info(f"Executing comprehensive fetch for {self.default_country}")
+        master_index = pd.date_range(start=start_time, end=end_time, freq=self.freq_grid, tz=start_time.tz, inclusive='left')
+        master_df = pd.DataFrame(index=master_index)
         
-        master_df = pd.DataFrame(index=pd.date_range(start=start_time, end=end_time, freq=self.freq_grid, tz=start_time.tz, inclusive='left'))
-        metrics = self._fetch_all_core_metrics(start_time, end_time)
-        
-        for prefix, data in metrics.items():
-            master_df = master_df.join(self._align_and_flatten(data, prefix), how='left')
-
-        master_df = self._integrate_extended_data(master_df, start_time, end_time)
+        try:
+            query_configs = self._get_query_configs(start_time, end_time, self.default_country)
+            for q in query_configs:
+                result = self._safe_query(q['func'], *q['args'], **q.get('kwargs', {}))
+                if not result.empty:
+                    aligned = self._align_and_flatten(result, q['prefix'])
+                    # Join logic that avoids adding _x, _y suffixes by skipping existing columns
+                    new_cols = [c for c in aligned.columns if c not in master_df.columns]
+                    if new_cols:
+                        master_df = master_df.join(aligned[new_cols], how='left')
+        except (RetryError, RequestException) as e:
+            raise EntsoeAPIError(f"API fetch failed: {e}")
+        except Exception as e:
+            raise EntsoeAPIError(f"Unexpected error: {e}")
+                
         return self.finalize_dataframe_structure(master_df)
 
-    def _fetch_all_core_metrics(self, start, end) -> Dict[str, pd.DataFrame]:
-        return {
-            'DA_Price': self._safe_query(self.client.query_day_ahead_prices, self.default_country, start=start, end=end),
-            'Load_Actual': self._safe_query(self.client.query_load, self.default_country, start=start, end=end),
-            'Imb': self._safe_query(self.client.query_imbalance_volumes, self.default_country, start=start, end=end)
-        }
-
-    def _integrate_extended_data(self, master_df: pd.DataFrame, start, end) -> pd.DataFrame:
-        try:
-            extended_df = self._fetch_extended_metrics(start, end, self.default_country)
-            if not extended_df.empty:
-                return master_df.join(extended_df, how='left')
-        except Exception as e:
-            logging.error(f"Extended metrics integration failed: {e}")
-        return master_df
-
     def fetch_extended_market_data(self, start_time, end_time, target_country=DEFAULT_COUNTRY) -> pd.DataFrame:
-        df = self._fetch_extended_metrics(start_time, end_time, target_country)
-        return self.finalize_dataframe_structure(df)
+        return self.fetch_comprehensive_market_data(start_time, end_time)
 
-    def _fetch_extended_metrics(self, start_time, end_time, target_country) -> pd.DataFrame:
-        master_index = pd.date_range(start=start_time, end=end_time, freq=self.freq_grid, tz=start_time.tz, inclusive='left')
-        df = pd.DataFrame(index=master_index)
-
-        def add_metric(query_func, args, prefix, extra_kwargs=None):
-            nonlocal df
-            result = self._safe_query(query_func, *args, **(extra_kwargs or {}))
-            if not result.empty:
-                df = df.join(self._align_and_flatten(result, prefix), how='left').reindex(master_index)
-
-        queries = self._get_extended_query_configs(start_time, end_time, target_country)
-        for q in queries:
-            add_metric(q['func'], q['args'], q['prefix'], q.get('kwargs'))
-
-        return df
-
-    def _get_extended_query_configs(self, start, end, country) -> List[Dict]:
-        return [
-            {'func': self.client.query_net_position, 'args': (country,), 'prefix': 'NetPos', 'kwargs': {'dayahead': True, 'start': start, 'end': end}},
+    def _get_query_configs(self, start, end, country) -> List[Dict]:
+        configs = [
+            {'func': self.client.query_day_ahead_prices, 'args': (country,), 'prefix': 'DA_Price', 'kwargs': {'start': start, 'end': end}},
             {'func': self.client.query_load_and_forecast, 'args': (country,), 'prefix': 'Load', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_net_position, 'args': (country,), 'prefix': 'NetPos', 'kwargs': {'dayahead': True, 'start': start, 'end': end}},
+            {'func': self.client.query_imbalance_volumes, 'args': (country,), 'prefix': 'Imb', 'kwargs': {'start': start, 'end': end}},
             {'func': self.client.query_generation_forecast, 'args': (country,), 'prefix': 'GenFc', 'kwargs': {'start': start, 'end': end}},
-            {'func': self.client.query_generation, 'args': (country,), 'prefix': 'Gen', 'kwargs': {'start': start, 'end': end, 'psr_type': None}},
+            {'func': self.client.query_wind_and_solar_forecast, 'args': (country,), 'prefix': 'WS_Fc', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_intraday_wind_and_solar_forecast, 'args': (country,), 'prefix': 'WS_ID_Fc', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_generation, 'args': (country,), 'prefix': 'Gen', 'kwargs': {'start': start, 'end': end}},
             {'func': self.client.query_generation_per_plant, 'args': (country,), 'prefix': 'GenPlant', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_aggregated_bids, 'args': (country, DEFAULT_PROCESS_TYPE), 'prefix': 'AggBids', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_current_balancing_state, 'args': (country,), 'prefix': 'BalState', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_contracted_reserve_prices, 'args': (country, DEFAULT_PROCESS_TYPE, DEFAULT_MARKET_AGREEMENT_TYPE), 'prefix': 'ResPrice', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_contracted_reserve_prices_procured_capacity, 'args': (country, DEFAULT_PROCESS_TYPE, DEFAULT_MARKET_AGREEMENT_TYPE), 'prefix': 'ResCap', 'kwargs': {'start': start, 'end': end}},
+            {'func': self.client.query_contracted_reserve_amount, 'args': (country, DEFAULT_PROCESS_TYPE, DEFAULT_MARKET_AGREEMENT_TYPE), 'prefix': 'ResAmt', 'kwargs': {'start': start, 'end': end}},
         ]
+        for neighbor in BE_NEIGHBORS:
+            configs.append({'func': self.client.query_crossborder_flows, 'args': (country, neighbor), 'prefix': f'Export_{neighbor}', 'kwargs': {'start': start, 'end': end}})
+            configs.append({'func': self.client.query_crossborder_flows, 'args': (neighbor, country), 'prefix': f'Import_{neighbor}', 'kwargs': {'start': start, 'end': end}})
+            configs.append({'func': self.client.query_scheduled_exchanges, 'args': (country, neighbor), 'prefix': f'SchedExc_{neighbor}', 'kwargs': {'start': start, 'end': end, 'dayahead': False}})
+            configs.append({'func': self.client.query_net_transfer_capacity_weekahead, 'args': (country, neighbor), 'prefix': f'NTC_Week_{neighbor}', 'kwargs': {'start': start, 'end': end}})
+        
+        configs.append({'func': self.client.query_physical_crossborder_allborders, 'args': (country, start, end), 'prefix': 'PhysFlow_All', 'kwargs': {'export': True}})
+        configs.append({'func': self.client.query_import, 'args': (country, start, end), 'prefix': 'Import_Sum'})
+        return configs
 
     def finalize_dataframe_structure(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None: return pd.DataFrame()
-        
         df = self._flatten_column_names(df)
         df = self._sanitize_column_formatting(df)
+        
+        # De-duplicate columns (ensures only unique names survive the cleaning process)
+        df = df.loc[:, ~df.columns.duplicated()]
         
         if isinstance(df.index, pd.DatetimeIndex):
             df.index.name = 'Time_UTC'
             df = df.reset_index()
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+            # Clean index artifacts
+            df = df.loc[:, ~df.columns.str.contains('^Unnamed|^index')]
         return df
 
     def _flatten_column_names(self, df: pd.DataFrame) -> pd.DataFrame:
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join([str(c) for c in col if str(c).strip()]) for col in df.columns.values]
+            df.columns = ['_'.join(filter(None, [str(c).strip() for c in col])) for col in df.columns.values]
         return df
 
     def _sanitize_column_formatting(self, df: pd.DataFrame) -> pd.DataFrame:
-        df.columns = [re.sub(r'_0\s*$', '', str(col)).strip() for col in df.columns]
+        # Global cleaning pass for suffixes and redundant prefixes
+        df.columns = [re.sub(r'_\d+\s*$', '', str(col)).strip() for col in df.columns]
         df.columns = [re.sub(r'[\s\.\-\(\)]+', '_', col).strip('_') for col in df.columns]
+        
+        # Consolidate Load and actual redundancies recursively
+        df.rename(columns=lambda x: x.replace('Load_Actual_Load', 'Load_Actual').replace('Actual_Actual', 'Actual'), inplace=True)
         return df
 
 if __name__ == "__main__":
@@ -182,5 +184,7 @@ if __name__ == "__main__":
     try:
         c = EntsoeDataClient()
         now = pd.Timestamp.now(tz=DEFAULT_TIMEZONE).floor('D')
-        print(c.fetch_comprehensive_market_data(now - pd.Timedelta(days=1), now).head())
-    except Exception as e: print(e)
+        data = c.fetch_comprehensive_market_data(now - pd.Timedelta(days=1), now)
+        print(f"Final Column Count: {len(data.columns)}")
+    except Exception as e:
+        print(f"Sample run failed: {e}")

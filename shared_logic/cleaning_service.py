@@ -1,6 +1,7 @@
 import pandas as pd
 import io
 import logging
+import re
 
 try:
     from shared_logic.constants import DEFAULT_FREQ_GRID
@@ -74,16 +75,16 @@ class CleaningService:
 
     @staticmethod
     def _apply_filling_strategies(df: pd.DataFrame) -> pd.DataFrame:
-        # Step-Function: Constant values (Prices, NTC, Bids) carried forward into sub-periods.
-        # This is essential for upsampling 60-min data to 15-min ISPs.
-        step_prefixes = ('DA_', 'NTC_', 'ResPrice_', 'ResCap_', 'ResAmt_', 'AggBids_')
-        step_cols = [c for c in df.columns if any(c.startswith(p) for p in step_prefixes) or c.lower().startswith('price')]
+        # Step-Function: Metrics that remain constant across an hour or represent 
+        # market commitments/forecasts. We forward-fill to map 60-min data to 15-min ISPs.
+        step_patterns = ('DA_', 'NTC_', 'ResPrice_', 'ResCap_', 'ResAmt_', 'AggBids_', 'SchedExc_', 'Forecast', 'Fc_')
+        
+        step_cols = [c for c in df.columns if any(p in c for p in step_patterns) or 'Price' in c]
         if step_cols:
             df[step_cols] = df[step_cols].ffill(limit=3)
 
         # Power System Core Rule: "NULL if NULL".
-        # Physical signals (Load, Gen, Flows) should generally NOT be interpolated 
-        # as it can create misleading artifacts during outages or sharp transitions.
+        # Physical signals (Actual Load, Gen, Flows) must NOT be interpolated/filled.
         return df
 
     @staticmethod
@@ -100,5 +101,11 @@ class CleaningService:
 
     @staticmethod
     def _finalize_refinement(df: pd.DataFrame) -> pd.DataFrame:
-        # Strict "NULL if NULL" policy. Avoid default zero-filling.
+        # Final safety cleanup for column headers to ensure no redundant suffixes like _0 survive.
+        df.columns = [re.sub(r'_\d+\s*$', '', str(col)).strip() for col in df.columns]
+
+        # De-duplicate any newly colliding names and drop index artifacts
+        df = df.loc[:, ~df.columns.duplicated()]
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed|^index')]
+
         return df
