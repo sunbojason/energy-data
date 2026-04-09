@@ -50,6 +50,10 @@ class EntsoeDataClient:
             q_name = getattr(query_func, '__name__', 'API_Query')
             logger.error(f"Network error in {q_name}: {e}")
             raise
+        except AttributeError as e:
+            q_name = getattr(query_func, '__name__', 'API_Query')
+            logger.warning(f"[{q_name}] AttributeError in response parsing — skipping: {e}")
+            return pd.DataFrame()
         except Exception as e:
             if "duplicate values are not supported in stack" in str(e).lower():
                 logger.warning(f"Structural corruption in response: {e}")
